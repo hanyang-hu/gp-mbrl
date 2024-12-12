@@ -22,7 +22,7 @@ def update_metric(metrics, new_metrics):
 def evaluate(env, agent, num_episodes, step, episode_length, action_repeat, render):
     """Evaluate a trained agent and optionally save a video."""
     episode_rewards = []
-    for i in range(num_episodes):
+    for _ in range(num_episodes):
         obs, _ = env.reset()
         done, ep_reward, t = False, 0, 0
         agent.reset_correction()
@@ -37,6 +37,7 @@ def evaluate(env, agent, num_episodes, step, episode_length, action_repeat, rend
             ep_reward += reward
             t += 1
         episode_rewards.append(ep_reward)
+    env.close()
     return np.nanmean(episode_rewards)
 
 
@@ -63,6 +64,7 @@ def train(cfg_path = "./default.yaml"):
         obs, _ = env.reset(seed=cfg.seed)
         agent.reset_correction() # do nothing for TD-MPC
         episode = Episode(cfg, obs)
+
         while not episode.done:
             action = agent.plan(obs, step=step, t0=episode.first)
             for _ in range(cfg.action_repeat):
@@ -96,8 +98,9 @@ def train(cfg_path = "./default.yaml"):
         # Evaluate and visualize agent periodically
         if cfg.eval and env_step != 0 and env_step % cfg.eval_freq == 0:
             with torch.no_grad():
-                eval_env = gym.make(cfg.task, render_mode="human")
-                evaluate(eval_env, agent, cfg.eval_episodes, step, int(eval(cfg.val_episode_length)), action_repeat=cfg.action_repeat, render=True)
+                render = cfg.render_eval
+                eval_env = gym.make(cfg.task, render_mode="human") if render else gym.make(cfg.task, render_mode="rgb_array") 
+                evaluate(eval_env, agent, cfg.eval_episodes, step, int(eval(cfg.val_episode_length)), action_repeat=cfg.action_repeat, render=render)
             print(f"Evaluation:\n    Episode: {episode_idx}, \n    Step: {step},\n    Env Step: {env_step},\n    Total Time: {time.time() - start_time:.2f}s,\n    Episode Reward: {common_metrics['episode_reward']:.2f}")
 
     print('Training completed successfully')

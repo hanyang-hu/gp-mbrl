@@ -86,6 +86,7 @@ class Agent():
     def estimate_value(self, z, actions, horizon):
         raise NotImplementedError
 
+    @torch.no_grad()
     def plan(self, obs, eval_mode=False, step=None, t0=True):
         """
         Plan next action using TD-MPC inference without latent.
@@ -93,6 +94,8 @@ class Agent():
         eval_mode: uniform sampling and action noise is disabled during evaluation.
         step: current time step. determines e.g. planning horizon.
         t0: whether current step is the first step of an episode.
+
+        Remark. Must run with no_grad to avoid memory accumulation.
         """
         # Seed steps (return random actions for exploration)
         if step < self.cfg.seed_steps and not eval_mode:
@@ -145,6 +148,7 @@ class Agent():
         a = mean
         if not eval_mode:
             a += std * torch.randn(self.cfg.action_dim, device=std.device)
+
         return a
     
     def correction(self, obs, act, rew, next_obs, done):
