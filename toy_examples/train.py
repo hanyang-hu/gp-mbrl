@@ -10,7 +10,7 @@ from agent import TDMPC
 from utils import Episode, ReplayBuffer
 
 
-def evaluate(env, agent, num_episodes, step, episode_length, render):
+def evaluate(env, agent, num_episodes, step, episode_length, action_repeat, render):
     """Evaluate a trained agent and optionally save a video."""
     episode_rewards = []
     for i in range(num_episodes):
@@ -19,7 +19,8 @@ def evaluate(env, agent, num_episodes, step, episode_length, render):
         agent.reset_correction()
         while not done and t < episode_length:
             action = agent.plan(obs, eval_mode=True, step=step, t0=t==0)
-            next_obs, reward, done, _, _ = env.step(action.cpu().numpy())
+            for _ in range(action_repeat):
+                next_obs, reward, done, _, _ = env.step(action.detach().cpu().numpy())
             agent.correction(obs, action, next_obs, reward, done)
             if render:
                 env.render()
@@ -49,18 +50,20 @@ def train(cfg_path = "./default.yaml"):
         episode = Episode(cfg, obs)
         while not episode.done:
             action = agent.plan(obs, step=step, t0=episode.first)
-            next_obs, reward, done, _, _ = env.step(action.detach().cpu().numpy())
+            for _ in range(cfg.action_repeat):
+                next_obs, reward, done, _, _ = env.step(action.detach().cpu().numpy())
             agent.correction(obs, action, next_obs, reward, done) # do nothing for TD-MPC
             obs = next_obs
             episode += (obs, action, reward, done)
-        assert len(episode) == cfg.episode_length
+        # print(len(episode), cfg.episode_length)
+        # assert len(episode) == cfg.episode_length
         buffer += episode
 
         # Update model
         train_metrics = {}
         if step >= cfg.seed_steps:
             num_updates = cfg.seed_steps if step == cfg.seed_steps else cfg.episode_length
-            progress_bar = tqdm.tqdm(range(num_updates), desc=f"Training Episode: {episode_idx}")
+            progress_bar = tqdm.tqdm(range(num_updates), desc=f"Episode {episode_idx}")
             for _ in progress_bar:
                 loss = agent.update(buffer, step)
                 train_metrics.update(loss)
@@ -78,11 +81,11 @@ def train(cfg_path = "./default.yaml"):
         train_metrics.update(common_metrics)
 
         # Evaluate and visualize agent periodically
-        if env_step != 0 and env_step % cfg.eval_freq == 0:
+        if env_step != 0 and env_step % int(eval(cfg.eval_freq)) == 0:
             with torch.no_grad():
                 eval_env = gym.make(cfg.task, render_mode="human")
-                evaluate(eval_env, agent, cfg.eval_episodes, step, cfg.val_episode_length, render=True)
-            # print(f"Evaluation: Episode: {episode_idx}, Step: {step}, Env Step: {env_step}, Total Time: {time.time() - start_time:.2f}s, Episode Reward: {common_metrics['episode_reward']:.2f}")
+                evaluate(eval_env, agent, cfg.eval_episodes, step, int(eval(cfg.val_episode_length)), action_repeat=cfg.action_repeat, render=True)
+            print(f"Evaluation:\n    Episode: {episode_idx}, \n    Step: {step},\n    Env Step: {env_step},\n    Total Time: {time.time() - start_time:.2f}s,\n    Episode Reward: {common_metrics['episode_reward']:.2f}")
 
     print('Training completed successfully')
 

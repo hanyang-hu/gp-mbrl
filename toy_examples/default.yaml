@@ -1,11 +1,11 @@
 # environment
 task: "Pendulum-v1"
 modality: 'state'
-action_repeat: 1
+action_repeat: 5
 discount: 0.99
 episode_length: 200/${action_repeat}
-val_episode_length: 200
-train_steps: 10000/${action_repeat}
+val_episode_length: 200/${action_repeat}
+train_steps: 2000/${action_repeat}
 
 # planning
 iterations: 6
@@ -17,7 +17,7 @@ temperature: 0.5
 momentum: 0.1
 
 # learning
-batch_size: 512
+batch_size: 128
 max_buffer_size: 1000000
 horizon: 5
 reward_coef: 0.5
@@ -48,7 +48,7 @@ wandb_entity: none
 # misc
 seed: 1
 exp_name: default
-eval_freq: 5000
+eval_freq: 200/${action_repeat}
 eval_episodes: 1
 save_video: false
 save_model: false
