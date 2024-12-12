@@ -21,6 +21,7 @@ def update_metric(metrics, new_metrics):
 
 def evaluate(env, agent, num_episodes, step, episode_length, action_repeat, render):
     """Evaluate a trained agent and optionally save a video."""
+    agent.to_eval()
     episode_rewards = []
     for _ in range(num_episodes):
         obs, _ = env.reset()
@@ -28,8 +29,13 @@ def evaluate(env, agent, num_episodes, step, episode_length, action_repeat, rend
         agent.reset_correction()
         while not done and t < episode_length:
             action = agent.plan(obs, eval_mode=True, step=step, t0=t==0)
+            reward, done = 0.0, False
             for _ in range(action_repeat):
-                next_obs, reward, done, _, _ = env.step(action.detach().cpu().numpy())
+                next_obs, r, d, _, _ = env.step(action.detach().cpu().numpy())
+                reward += r # accumulate reward over action repeat
+                done = done or d
+                if done:
+                    break
             agent.correction(obs, action, next_obs, reward, done)
             if render:
                 env.render()
@@ -38,6 +44,7 @@ def evaluate(env, agent, num_episodes, step, episode_length, action_repeat, rend
             t += 1
         episode_rewards.append(ep_reward)
     env.close()
+    agent.to_train()
     return np.nanmean(episode_rewards)
 
 
@@ -65,14 +72,21 @@ def train(cfg_path = "./default.yaml"):
         agent.reset_correction() # do nothing for TD-MPC
         episode = Episode(cfg, obs)
 
+        agent.to_eval() # fix statistics such as layernorm
         while not episode.done:
             action = agent.plan(obs, step=step, t0=episode.first)
+            reward, done = 0.0, False
             for _ in range(cfg.action_repeat):
-                next_obs, reward, done, _, _ = env.step(action.detach().cpu().numpy())
+                next_obs, r, d, _, _ = env.step(action.detach().cpu().numpy())
+                reward += r # accumulate reward over action repeat
+                done = done or d
+                if done:
+                    break
             agent.correction(obs, action, next_obs, reward, done) # do nothing for TD-MPC
             obs = next_obs
             episode += (obs, action, reward, done)
         assert len(episode) == cfg.episode_length
+        agent.to_train()
         buffer += episode
 
         # Update model
@@ -101,7 +115,7 @@ def train(cfg_path = "./default.yaml"):
                 render = cfg.render_eval
                 eval_env = gym.make(cfg.task, render_mode="human") if render else gym.make(cfg.task, render_mode="rgb_array") 
                 evaluate(eval_env, agent, cfg.eval_episodes, step, int(eval(cfg.val_episode_length)), action_repeat=cfg.action_repeat, render=render)
-            print(f"Evaluation:\n    Episode: {episode_idx}, \n    Step: {step},\n    Env Step: {env_step},\n    Total Time: {time.time() - start_time:.2f}s,\n    Episode Reward: {common_metrics['episode_reward']:.2f}")
+            print(f"Evaluation:\n    Episode: {episode_idx}, \n    Step: {step},\n    Env Step: {env_step},\n    Total Time: {time.time() - start_time:.2f}s,\n    Episode Reward: {common_metrics['episode_reward']:.2f}\n    Horizon: {agent._prev_mean.shape}")
 
     print('Training completed successfully')
 
@@ -110,14 +124,13 @@ def train(cfg_path = "./default.yaml"):
         os.makedirs(os.path.dirname(cfg.save_path), exist_ok=True)
         agent.save(cfg.save_path)
         print(f'Model saved to {cfg.save_path}')
-    # Save training metrics to "./results/{cfg.task}/metrics.csv"
-    # create the directory if it does not exist
+    # Save training metrics to "./results/{cfg.task}/metrics_{cfg.exp_name}_{cfg.seed}.csv"
     os.makedirs(f"./results/{cfg.task}", exist_ok=True)
-    with open(f"./results/{cfg.task}/metrics.csv", "w") as f:
+    with open(f"./results/{cfg.task}/metrics_{cfg.exp_name}_{cfg.seed}.csv", "w") as f:
         f.write("episode,step,env_step,total_time,episode_reward\n")
         for i in range(episode_idx):
             f.write(f"{train_metrics['episode'][i]},{train_metrics['step'][i]},{train_metrics['env_step'][i]},{train_metrics['total_time'][i]},{train_metrics['episode_reward'][i]}\n")
-    print(f"Training metrics saved to ./results/{cfg.task}/metrics.csv")
+    print(f"Training metrics saved to ./results/{cfg.task}/metrics_{cfg.exp_name}_{cfg.seed}.csv")
 
 if __name__ == "__main__":
     train()

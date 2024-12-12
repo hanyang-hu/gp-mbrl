@@ -83,6 +83,7 @@ class Agent():
             return utils.TruncatedNormal(mu, std).sample(clip=0.3)
         return mu
     
+    @torch.no_grad()
     def estimate_value(self, z, actions, horizon):
         raise NotImplementedError
 
@@ -228,6 +229,7 @@ class TDMPC(Agent):
     def __init__(self, cfg):
         super().__init__(cfg)
 
+    @torch.no_grad()
     def estimate_value(self, z, actions, horizon):
         G, discount = 0, 1
         for t in range(horizon):
