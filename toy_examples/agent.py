@@ -169,13 +169,16 @@ class Agent():
         self.memory["act"][step] = act.to(self.device)
         self.memory["rew"][step] = torch.tensor(rew).to(self.device)
         self.memory["next_obs"][step] = torch.tensor(next_obs).to(self.device)
+
+        # Reward centering
+        self.rew_ctr += self.cfg.rew_beta * (rew - self.rew_ctr)
     
     def reset_correction(self):
         return
 
     def next(self, z, a):
         x = torch.cat([z, a], dim=-1)
-        return z + self.dynamics_model(x), self.rew_ctr + self.rew_fn(x)
+        return z.clone().detach() + self.dynamics_model(x), self.rew_fn(x)
     
     def track_q_grad(self, enable=True):
         for m in [self.q1_net, self.q2_net]:
@@ -242,13 +245,14 @@ class TDMPC(Agent):
         super().__init__(cfg)
     
     def update(self, replay_buffer, step):
-        self.rew_ctr = self.memory["rew"].mean().item()
-        
         with torch.autograd.set_detect_anomaly(False):
             obs, next_obses, action, reward, idxs, weights = replay_buffer.sample()
 
             # Reset action to a leaf node
             action = action.detach()
+
+            # Centering reward signals
+            centered_reward = reward - self.rew_ctr
 
             self.optim.zero_grad(set_to_none=True)
             self.std = utils.linear_schedule(self.cfg.std_schedule, step)
@@ -270,12 +274,12 @@ class TDMPC(Agent):
 
                 next_obs = next_obses[t]
                 next_z = next_obs # no encoding (supposedly from target encoder)
-                td_target = self._td_target(next_obs, reward[t]).detach()
+                td_target = self._td_target(next_obs, centered_reward[t]).detach()
 
                 # Losses
                 rho = (self.cfg.rho ** t)
                 consistency_loss += rho * torch.mean(utils.mse(z[t+1], next_z), dim=1)
-                reward_loss += rho * utils.mse(reward_pred, reward[t]).squeeze(1)
+                reward_loss += rho * utils.mse(reward_pred, centered_reward[t]).squeeze(1)
                 value_loss += rho * (utils.mse(Q1, td_target) + utils.mse(Q2, td_target)).squeeze(1)
                 priority_loss += rho * (utils.l1(Q1, td_target) + utils.l1(Q2, td_target)).squeeze(1)
 

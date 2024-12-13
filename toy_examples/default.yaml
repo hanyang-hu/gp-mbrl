@@ -1,6 +1,6 @@
 # environment
 task: "Pendulum-v1"
-exp_name: td_mpc_no_latent
+exp_name: td_mpc_no_latent_ctr
 save_path: "models/${task}/${exp_name}_${seed}.pt"
 modality: 'state'
 action_repeat: 1
@@ -38,14 +38,15 @@ consistency_coef: 2
 rho: 0.5
 kappa: 0.1
 lr: 1e-3
-std_schedule: linear(0.5, ${min_std}, 3000)
-horizon_schedule: linear(1, ${horizon}, 3000)
+std_schedule: linear(0.5, ${min_std}, 4000)
+horizon_schedule: linear(1, ${horizon}, 4000)
 per_alpha: 0.6
 per_beta: 0.4
 grad_clip_norm: 10
 seed_steps: 200
 update_freq: 1
 tau: 0.01
+rew_beta: 5e-3
 
 # architecture
 enc_dim: 256
@@ -56,3 +57,4 @@ latent_dim: 50
 use_wandb: false
 wandb_project: none
 wandb_entity: none
+

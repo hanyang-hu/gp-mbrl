@@ -102,7 +102,11 @@ def train(cfg_path = "./default.yaml", seed=None):
             progress_bar = tqdm.tqdm(range(num_updates), desc=f"Episode {episode_idx}")
             for _ in progress_bar:
                 loss = agent.update(buffer, step)
-                progress_bar.set_postfix({"Weighted Loss": loss["weighted_loss"]})
+                progress_bar.set_postfix(
+                    {
+                        "Weighted Loss": loss["weighted_loss"],
+                    }
+                )
 
         # Log training episode
         episode_idx += 1
@@ -112,13 +116,15 @@ def train(cfg_path = "./default.yaml", seed=None):
             'step': step,
             'env_step': env_step,
             'total_time': time.time() - start_time,
-            'episode_reward': episode.cumulative_reward
+            'episode_reward': episode.cumulative_reward,
         }
         update_metric(train_metrics, common_metrics)
         try:
             print(f"Episode {episode_idx}:\n    Step: {step},\n    Env Step: {env_step},\n    Total Time: {time.time() - start_time:.2f}s,\n    Episode Reward: {common_metrics['episode_reward']:.2f}\n    Horizon: {agent._prev_mean.shape}")
+            print(f"    'reward center': {agent.rew_ctr:.2f}")
         except:
             print(f"Episode {episode_idx}:\n    Step: {step},\n    Env Step: {env_step},\n    Total Time: {time.time() - start_time:.2f}s,\n    Episode Reward: {common_metrics['episode_reward']:.2f}")
+            print(f"    'reward center': {agent.rew_ctr:.2f}")
 
         # Evaluate and visualize agent periodically
         if cfg.eval and env_step != 0 and env_step % cfg.eval_freq == 0:
@@ -126,7 +132,7 @@ def train(cfg_path = "./default.yaml", seed=None):
                 render = cfg.render_eval
                 eval_env = gym.make(cfg.task, render_mode="human") if render else gym.make(cfg.task, render_mode="rgb_array") 
                 evaluate(eval_env, agent, cfg.eval_episodes, step, int(eval(cfg.val_episode_length)), action_repeat=cfg.action_repeat, render=render)
-            print(f"Evaluation:\n    Episode: {episode_idx}, \n    Step: {step},\n    Env Step: {env_step},\n    Total Time: {time.time() - start_time:.2f}s,\n    Episode Reward: {common_metrics['episode_reward']:.2f}\n    Horizon: {agent._prev_mean.shape}")
+            # print(f"Evaluation:\n    Episode: {episode_idx}, \n    Step: {step},\n    Env Step: {env_step},\n    Total Time: {time.time() - start_time:.2f}s,\n    Episode Reward: {common_metrics['episode_reward']:.2f}\n    Horizon: {agent._prev_mean.shape}")
 
     print('Training completed successfully')
 
