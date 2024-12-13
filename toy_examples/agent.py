@@ -113,7 +113,7 @@ class Agent():
             z = obs.repeat(num_pi_trajs, 1)
             for t in range(horizon):
                 pi_actions[t] = self.pi(z, self.cfg.min_std)
-                z = self.dynamics_model(torch.cat([z, pi_actions[t]], dim=-1))
+                z, _ = self.next(z, pi_actions[t])
 
         # Initialize state and parameters
         z = obs.repeat(self.cfg.num_samples+num_pi_trajs, 1)
@@ -306,6 +306,8 @@ class GPTDMPC(Agent):
     Replace the dynamics model and reward function with SVDKL.
     Only access the mean function at inference time.
 
+    Remark. Not working to the best of my knowledge.
+
     TODO: 
         1. Implement correction and reset_correction method
     """
@@ -355,8 +357,14 @@ class GPTDMPC(Agent):
         Difference to the original method: use SVDKL, only access the mean function at inference time.
         """
         x = torch.cat([z, a], dim=-1)
-        pred_x = z + self.dynamics_model(x).mean 
-        pred_r = self.rew_fn(x).mean
+        training = self.dynamics_model.training
+        if training:
+            pred_x = self.dynamics_model(x).mean
+            pred_r = self.rew_fn(x).mean
+        else:
+            with gpytorch.settings.fast_pred_var(), gpytorch.settings.max_root_decomposition_size(30):
+                pred_x = self.dynamics_model(x).mean
+                pred_r = self.rew_fn(x).mean
         return pred_x, pred_r
     
     def update(self, replay_buffer, step):
@@ -392,8 +400,8 @@ class GPTDMPC(Agent):
 
                 # Losses
                 rho = (self.cfg.rho ** t)
-                consistency_loss += rho * torch.mean(utils.mse(z[t+1], next_z), dim=1)
-                reward_loss += rho * utils.mse(r_pred[t], reward[t]).squeeze(1)
+                # consistency_loss += rho * torch.mean(utils.mse(z[t+1], next_z), dim=1)
+                # reward_loss += rho * utils.mse(r_pred[t], reward[t]).squeeze(1)
                 value_loss += rho * (utils.mse(Q1, td_target) + utils.mse(Q2, td_target)).squeeze(1)
                 priority_loss += rho * (utils.l1(Q1, td_target) + utils.l1(Q2, td_target)).squeeze(1)
 
@@ -402,9 +410,7 @@ class GPTDMPC(Agent):
             rew_loss = -self.rew_mll(self.rew_fn(input), reward[0])
 
             # Optimize model
-            total_loss = self.cfg.consistency_coef * consistency_loss.clamp(max=1e4) + \
-                        self.cfg.reward_coef * reward_loss.clamp(max=1e4) + \
-                        self.cfg.value_coef * value_loss.clamp(max=1e4)
+            total_loss = self.cfg.value_coef * value_loss.clamp(max=1e4)
 
             weighted_loss = (total_loss * weights).mean() + self.cfg.consistency_coef * dm_loss.clamp(max=1e4) + self.cfg.reward_coef * rew_loss.clamp(max=1e4)
             weighted_loss.register_hook(lambda grad: grad * (1/self.cfg.horizon)) 
@@ -446,3 +452,26 @@ class GPTDMPC(Agent):
                 'total_loss': float(total_loss.mean().item()),
                 'weighted_loss': float(weighted_loss.mean().item())
             }
+        
+
+class MOPOC(TDMPC):
+    """
+    Build on top of TD-MPC with online correction based on Gaussian Processes.
+    Update Gaussian Processes when updating the target networks. (i.e. follow cfg.update_freq)
+    """
+    def __init__(self, cfg):
+        super().__init__(cfg)
+
+        # TODO: Add GP models (dynamics and reward), Ornstein-Uhlenbeck process, memory (instead of replay buffer), etc.
+
+    def correction(self, obs, act, rew, next_obs, done):
+        pass
+
+    def reset_correction(self):
+        pass
+
+    def next(self, z, a):
+        pass
+
+    def update(self, replay_buffer, step):
+        pass

@@ -43,7 +43,7 @@ class MLP(nn.Module):
         return x
     
 
-class GaussianProcessLayer(gpytorch.models.ApproximateGP):
+class SVSKILayer(gpytorch.models.ApproximateGP):
     """
     Stochastic Variational Gaussian Process (SVGP) layer with Grid Interpolation.
     Input is a tensor of shape (batch_size, output_dim, 2).
@@ -103,7 +103,7 @@ class SVDKL(gpytorch.Module):
         self.feature_extractor = FeatureExtractor(input_dim, hidden_dim, 2, act_fn)
 
         grid_bounds = [grid_bound,] * 2
-        self.gp_layer = GaussianProcessLayer(output_dim=output_dim, grid_bounds=grid_bounds)
+        self.gp_layer = SVSKILayer(output_dim=output_dim, grid_bounds=grid_bounds)
 
         self.grid_bounds = grid_bounds
         self.scale_to_bounds = gpytorch.utils.grid.ScaleToBounds(grid_bound[0], grid_bound[1])

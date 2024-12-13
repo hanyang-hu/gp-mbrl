@@ -13,9 +13,9 @@ train_steps: 10000/${action_repeat}
 determinism: True # Remark. True if need to reproduce the results
 seed: 42
 eval: True
-eval_freq: 200 # originally 1000
+eval_freq: 2000 # originally 1000
 eval_episodes: 1
-render_eval: False # Remark. True if need to visualize evaluation and render in human mode
+render_eval: True # Remark. True if need to visualize evaluation and render in human mode
 save_video: false
 save_model: false
 
@@ -37,7 +37,7 @@ value_coef: 0.1
 consistency_coef: 2
 rho: 0.5
 kappa: 0.1
-lr: 1e-3
+lr: 1e-2
 std_schedule: linear(0.5, ${min_std}, 3000)
 horizon_schedule: linear(1, ${horizon}, 3000)
 per_alpha: 0.6

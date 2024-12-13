@@ -100,7 +100,7 @@ def train(cfg_path = "./default.yaml", seed=None):
         # Update model
         if step >= cfg.seed_steps:
             num_updates = cfg.seed_steps if step == cfg.seed_steps else cfg.episode_length
-            num_updates //= 2 # half the number of updates for GPTDMPC
+            # num_updates //= 2 # half the number of updates for GPTDMPC
             progress_bar = tqdm.tqdm(range(num_updates), desc=f"Episode {episode_idx}")
             for _ in progress_bar:
                 loss = agent.update(buffer, step)
@@ -117,6 +117,10 @@ def train(cfg_path = "./default.yaml", seed=None):
             'episode_reward': episode.cumulative_reward
         }
         update_metric(train_metrics, common_metrics)
+        try:
+            print(f"Episode {episode_idx}:\n    Step: {step},\n    Env Step: {env_step},\n    Total Time: {time.time() - start_time:.2f}s,\n    Episode Reward: {common_metrics['episode_reward']:.2f}\n    Horizon: {agent._prev_mean.shape}")
+        except:
+            print(f"Episode {episode_idx}:\n    Step: {step},\n    Env Step: {env_step},\n    Total Time: {time.time() - start_time:.2f}s,\n    Episode Reward: {common_metrics['episode_reward']:.2f}")
 
         # Evaluate and visualize agent periodically
         if cfg.eval and env_step != 0 and env_step % cfg.eval_freq == 0:
