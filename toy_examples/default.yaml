@@ -10,7 +10,7 @@ val_episode_length: 200/${action_repeat}
 train_steps: 10000/${action_repeat}
 
 # misc
-seed: 42
+seed: 45
 eval: True
 eval_freq: 1000
 eval_episodes: 1

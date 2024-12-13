@@ -1,9 +1,11 @@
 import torch
 import numpy as np
+import random
 import time
 import os
 from omegaconf import OmegaConf
 import gymnasium as gym
+import torch.backends
 import tqdm
 
 from agent import TDMPC
@@ -51,9 +53,11 @@ def evaluate(env, agent, num_episodes, step, episode_length, action_repeat, rend
 def train(cfg_path = "./default.yaml"):
     cfg = OmegaConf.load(cfg_path)
     
-    # Set random seeds
+    # Set random seeds for reproducibility
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
+    random.seed(cfg.seed)
+    torch.use_deterministic_algorithms(True) # set CUBLAS_WORKSPACE_CONFIG=:4096:8 (for Windows)
 
     env = gym.make(cfg.task, render_mode="rgb_array")
     cfg.obs_dim = env.observation_space.shape[0]
