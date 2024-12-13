@@ -1,8 +1,8 @@
 import utils
 from copy import deepcopy
 import torch
-import gpytorch
 import numpy as np
+import warnings
 
 
 class Agent():
@@ -33,6 +33,15 @@ class Agent():
 
         # Reward network
         self.rew_fn = utils.MLP(obs_dim + cfg.action_dim, cfg.mlp_dim, 1).to(self.device)
+        self.rew_ctr = 0.0
+
+        train_steps = int(eval(cfg.train_steps))
+        self.memory = {
+            "obs": torch.zeros((train_steps, cfg.obs_dim)).to(self.device),
+            "act": torch.zeros((train_steps, cfg.action_dim)).to(self.device),
+            "next_obs": torch.zeros((train_steps, cfg.obs_dim)).to(self.device),
+            "rew": torch.zeros((train_steps, 1)).to(self.device)
+        }
 
         # Optimizer
         self.optim = torch.optim.Adam(
@@ -154,15 +163,19 @@ class Agent():
 
         return a
     
-    def correction(self, obs, act, rew, next_obs, done):
-        return # Default: no correction
+    def correction(self, obs, act, rew, next_obs, step):
+        # Update memory
+        self.memory["obs"][step] = torch.tensor(obs).to(self.device)
+        self.memory["act"][step] = act.to(self.device)
+        self.memory["rew"][step] = torch.tensor(rew).to(self.device)
+        self.memory["next_obs"][step] = torch.tensor(next_obs).to(self.device)
     
     def reset_correction(self):
         return
 
     def next(self, z, a):
         x = torch.cat([z, a], dim=-1)
-        return self.dynamics_model(x), self.rew_fn(x)
+        return z + self.dynamics_model(x), self.rew_ctr + self.rew_fn(x)
     
     def track_q_grad(self, enable=True):
         for m in [self.q1_net, self.q2_net]:
@@ -229,7 +242,9 @@ class TDMPC(Agent):
         super().__init__(cfg)
     
     def update(self, replay_buffer, step):
-        with torch.autograd.set_detect_anomaly(True):
+        self.rew_ctr = self.memory["rew"].mean().item()
+        
+        with torch.autograd.set_detect_anomaly(False):
             obs, next_obses, action, reward, idxs, weights = replay_buffer.sample()
 
             # Reset action to a leaf node
@@ -299,6 +314,30 @@ class TDMPC(Agent):
                 'total_loss': float(total_loss.mean().item()),
                 'weighted_loss': float(weighted_loss.mean().item())
             }
+        
+
+class MOPOC(TDMPC):
+    """
+    Build on top of TD-MPC with online correction based on Gaussian Processes.
+    Update Gaussian Processes when updating the target networks. (i.e. follow cfg.update_freq)
+    """
+    def __init__(self, cfg):
+        super().__init__(cfg)
+
+        # TODO: Add GP models (dynamics and reward), Ornstein-Uhlenbeck process, memory (instead of replay buffer), etc.
+
+    def correction(self, obs, act, rew, next_obs, done):
+        pass
+
+    def reset_correction(self):
+        pass
+
+    def next(self, z, a):
+        pass
+
+    def update(self, replay_buffer, step):
+        pass
+
 
 
 class GPTDMPC(Agent):
@@ -312,6 +351,10 @@ class GPTDMPC(Agent):
         1. Implement correction and reset_correction method
     """
     def __init__(self, cfg):
+        warnings.warn("GPTDMPC is not working as expected. Use TDMPC/MOPOC instead.")
+
+        import gpytorch
+
         super().__init__(cfg)
 
         self.dynamics_model = utils.SVDKL(cfg.obs_dim + cfg.action_dim, cfg.mlp_dim, cfg.obs_dim).to(self.device)
@@ -452,26 +495,3 @@ class GPTDMPC(Agent):
                 'total_loss': float(total_loss.mean().item()),
                 'weighted_loss': float(weighted_loss.mean().item())
             }
-        
-
-class MOPOC(TDMPC):
-    """
-    Build on top of TD-MPC with online correction based on Gaussian Processes.
-    Update Gaussian Processes when updating the target networks. (i.e. follow cfg.update_freq)
-    """
-    def __init__(self, cfg):
-        super().__init__(cfg)
-
-        # TODO: Add GP models (dynamics and reward), Ornstein-Uhlenbeck process, memory (instead of replay buffer), etc.
-
-    def correction(self, obs, act, rew, next_obs, done):
-        pass
-
-    def reset_correction(self):
-        pass
-
-    def next(self, z, a):
-        pass
-
-    def update(self, replay_buffer, step):
-        pass

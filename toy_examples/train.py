@@ -8,7 +8,7 @@ import gymnasium as gym
 import torch.backends
 import tqdm
 
-from agent import TDMPC, GPTDMPC
+from agent import TDMPC
 from utils import Episode, ReplayBuffer
 
 
@@ -28,7 +28,7 @@ def evaluate(env, agent, num_episodes, step, episode_length, action_repeat, rend
     for _ in range(num_episodes):
         obs, _ = env.reset()
         done, ep_reward, t = False, 0, 0
-        agent.reset_correction()
+        # agent.reset_correction()
         while not done and t < episode_length:
             action = agent.plan(obs, eval_mode=True, step=step, t0=t==0)
             reward, done = 0.0, False
@@ -38,7 +38,7 @@ def evaluate(env, agent, num_episodes, step, episode_length, action_repeat, rend
                 done = done or d
                 if done:
                     break
-            agent.correction(obs, action, next_obs, reward, done)
+            # agent.correction(obs, action, next_obs, reward, done)
             if render:
                 env.render()
             obs = next_obs
@@ -67,8 +67,7 @@ def train(cfg_path = "./default.yaml", seed=None):
     cfg.action_dim = env.action_space.shape[0]
     cfg.action_lower_bound = (env.action_space.low).tolist()
     cfg.action_upper_bound = (env.action_space.high).tolist()
-    # agent = TDMPC(cfg)
-    agent = GPTDMPC(cfg)
+    agent = TDMPC(cfg)
     buffer = ReplayBuffer(cfg)
 
     # Run training (adapted from https://github.com/nicklashansen/tdmpc/)
@@ -90,7 +89,7 @@ def train(cfg_path = "./default.yaml", seed=None):
                 done = done or d
                 if done:
                     break
-            agent.correction(obs, action, next_obs, reward, done) # do nothing for TD-MPC
+            agent.correction(obs, action, reward, next_obs, step+len(episode))
             obs = next_obs
             episode += (obs, action, reward, done)
         assert len(episode) == cfg.episode_length
@@ -100,7 +99,6 @@ def train(cfg_path = "./default.yaml", seed=None):
         # Update model
         if step >= cfg.seed_steps:
             num_updates = cfg.seed_steps if step == cfg.seed_steps else cfg.episode_length
-            # num_updates //= 2 # half the number of updates for GPTDMPC
             progress_bar = tqdm.tqdm(range(num_updates), desc=f"Episode {episode_idx}")
             for _ in progress_bar:
                 loss = agent.update(buffer, step)
