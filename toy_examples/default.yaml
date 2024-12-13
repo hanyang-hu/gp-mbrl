@@ -1,6 +1,6 @@
 # environment
 task: "Pendulum-v1"
-exp_name: td_mpc_no_latent
+exp_name: gp_td_mpc
 save_path: "models/${task}/${exp_name}_${seed}.pt"
 modality: 'state'
 action_repeat: 1
@@ -10,9 +10,10 @@ val_episode_length: 200/${action_repeat}
 train_steps: 10000/${action_repeat}
 
 # misc
-seed: 45
+determinism: True # Remark. True if need to reproduce the results
+seed: 42
 eval: True
-eval_freq: 1000
+eval_freq: 200 # originally 1000
 eval_episodes: 1
 render_eval: False # Remark. True if need to visualize evaluation and render in human mode
 save_video: false
@@ -37,8 +38,8 @@ consistency_coef: 2
 rho: 0.5
 kappa: 0.1
 lr: 1e-3
-std_schedule: linear(0.5, ${min_std}, 4000)
-horizon_schedule: linear(1, ${horizon}, 4000)
+std_schedule: linear(0.5, ${min_std}, 3000)
+horizon_schedule: linear(1, ${horizon}, 3000)
 per_alpha: 0.6
 per_beta: 0.4
 grad_clip_norm: 10

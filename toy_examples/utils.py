@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
+import gpytorch
 from torch import distributions as pyd
+import math
 from torch.distributions.utils import _standard_normal
 import torch.nn.functional as F
 import numpy as np
@@ -41,9 +43,77 @@ class MLP(nn.Module):
         return x
     
 
-class SVDKL(nn.Module):
-    """Replace the last layer of a MLP with a SVGP (SKI) layer."""
-    pass
+class GaussianProcessLayer(gpytorch.models.ApproximateGP):
+    """
+    Stochastic Variational Gaussian Process (SVGP) layer with Grid Interpolation.
+    Input is a tensor of shape (batch_size, output_dim, 2).
+    Output is a MultivariateNormal distribution (of dimension output_dim).
+    """
+    def __init__(self, output_dim, grid_bounds=[(-1., 1.), (-1., 1.)], grid_size=16):
+        variational_distribution = gpytorch.variational.CholeskyVariationalDistribution(
+            num_inducing_points=grid_size**2, batch_shape=torch.Size([output_dim])
+        )
+
+        variational_strategy = gpytorch.variational.IndependentMultitaskVariationalStrategy(
+            gpytorch.variational.GridInterpolationVariationalStrategy(
+                self, grid_size=grid_size, grid_bounds=grid_bounds,
+                variational_distribution=variational_distribution,
+            ), 
+            num_tasks=output_dim,
+        )
+        super().__init__(variational_strategy)
+
+        self.covar_module = gpytorch.kernels.ScaleKernel(
+            gpytorch.kernels.RBFKernel(
+                ard_num_dims=2,
+                batch_shape=torch.Size([output_dim]),
+                lengthscale_prior=gpytorch.priors.SmoothedBoxPrior(
+                    math.exp(-1), math.exp(1), sigma=0.1, transform=torch.exp
+                )
+            ),
+            batch_shape=torch.Size([output_dim])
+        )
+        self.mean_module = gpytorch.means.ConstantMean(batch_shape=torch.Size([output_dim]))
+        self.grid_bounds = grid_bounds
+
+    def forward(self, x):
+        mean = self.mean_module(x)
+        covar = self.covar_module(x)
+        return gpytorch.distributions.MultivariateNormal(mean, covar)
+    
+
+class FeatureExtractor(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, act_fn=nn.ELU()):
+        super(FeatureExtractor, self).__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
+        self.act_fn = act_fn
+        
+        self.apply(orthogonal_init)
+
+    def forward(self, x):
+        x = self.act_fn(self.fc1(x))
+        return self.fc2(x)
+    
+
+class SVDKL(gpytorch.Module):
+    """Replace the last layer of a MLP with a SVGP (with SKI) layer."""
+    def __init__(self, input_dim, hidden_dim, output_dim, act_fn=nn.ELU(), grid_bound=(-1., 1.)):
+        super(SVDKL, self).__init__()
+        self.feature_extractor = FeatureExtractor(input_dim, hidden_dim, 2, act_fn)
+
+        grid_bounds = [grid_bound,] * 2
+        self.gp_layer = GaussianProcessLayer(output_dim=output_dim, grid_bounds=grid_bounds)
+
+        self.grid_bounds = grid_bounds
+        self.scale_to_bounds = gpytorch.utils.grid.ScaleToBounds(grid_bound[0], grid_bound[1])
+
+        self.apply(orthogonal_init)
+
+    def forward(self, x):
+        x = self.feature_extractor(x)
+        x = self.scale_to_bounds(x)
+        return self.gp_layer(x)
     
 
 class QNet(nn.Module):

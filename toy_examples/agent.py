@@ -1,6 +1,7 @@
 import utils
 from copy import deepcopy
 import torch
+import gpytorch
 import numpy as np
 
 
@@ -19,7 +20,6 @@ class Agent():
         self.dynamics_model = utils.MLP(
             obs_dim + cfg.action_dim, cfg.mlp_dim, obs_dim
         ).to(self.device)
-        self.dm_target = deepcopy(self.dynamics_model)
 
         # (Double) Q function
         self.q1_net = utils.QNet(obs_dim, cfg.action_dim, cfg.mlp_dim).to(self.device)
@@ -29,12 +29,10 @@ class Agent():
 
         # Policy network
         self.pi_net = utils.PolicyNet(obs_dim, cfg.mlp_dim, cfg.action_dim, cfg.action_lower_bound, cfg.action_upper_bound).to(self.device)
-        self.pi_target = deepcopy(self.pi_net)
         self.pi_optim = torch.optim.Adam(self.pi_net.parameters(), lr=cfg.lr)
 
         # Reward network
         self.rew_fn = utils.MLP(obs_dim + cfg.action_dim, cfg.mlp_dim, 1).to(self.device)
-        self.rew_fn_target = deepcopy(self.rew_fn)
 
         # Optimizer
         self.optim = torch.optim.Adam(
@@ -54,9 +52,7 @@ class Agent():
         self.q1_target.eval()
         self.q2_target.eval()
         self.pi_net.eval()
-        self.pi_target.eval()
         self.rew_fn.eval()
-        self.rew_fn_target.eval()
 
     def save(self, path):
         torch.save(
@@ -85,7 +81,13 @@ class Agent():
     
     @torch.no_grad()
     def estimate_value(self, z, actions, horizon):
-        raise NotImplementedError
+        G, discount = 0, 1
+        for t in range(horizon):
+            z, reward = self.next(z, actions[t])
+            G += discount * reward
+            discount *= self.cfg.discount
+        G += discount * self.Q(z, self.pi(z, self.cfg.min_std)) # terminal value
+        return G
 
     @torch.no_grad()
     def plan(self, obs, eval_mode=False, step=None, t0=True):
@@ -204,11 +206,8 @@ class Agent():
         self.rew_fn.eval()
 
     def ema(self, tau):
-        utils.ema(self.dynamics_model, self.dm_target, tau)
         utils.ema(self.q1_net, self.q1_target, tau)
         utils.ema(self.q2_net, self.q2_target, tau)
-        utils.ema(self.pi_net, self.pi_target, tau)
-        utils.ema(self.rew_fn, self.rew_fn_target, tau)
 
     @torch.no_grad()
     def _td_target(self, next_obs, reward):
@@ -228,16 +227,6 @@ class TDMPC(Agent):
     """
     def __init__(self, cfg):
         super().__init__(cfg)
-
-    @torch.no_grad()
-    def estimate_value(self, z, actions, horizon):
-        G, discount = 0, 1
-        for t in range(horizon):
-            z, reward = self.next(z, actions[t])
-            G += discount * reward
-            discount *= self.cfg.discount
-        G += discount * self.Q(z, self.pi(z, self.cfg.min_std)) # terminal value
-        return G
     
     def update(self, replay_buffer, step):
         with torch.autograd.set_detect_anomaly(True):
@@ -312,12 +301,148 @@ class TDMPC(Agent):
             }
 
 
-class MOPOC(Agent):
+class GPTDMPC(Agent):
     """
-    Model-based Planning with Online Correction agent.
+    Replace the dynamics model and reward function with SVDKL.
+    Only access the mean function at inference time.
+
     TODO: 
-        1. Moidfy estimate_value
-        2. Modify update method
-        3. Implement correction amd reset_correction method
+        1. Implement correction and reset_correction method
     """
-    pass
+    def __init__(self, cfg):
+        super().__init__(cfg)
+
+        self.dynamics_model = utils.SVDKL(cfg.obs_dim + cfg.action_dim, cfg.mlp_dim, cfg.obs_dim).to(self.device)
+        self.dm_likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(num_tasks=cfg.obs_dim).to(self.device)
+        self.dm_mll = gpytorch.mlls.VariationalELBO(self.dm_likelihood, self.dynamics_model.gp_layer, num_data=int(eval(cfg.train_steps)))
+
+        self.rew_fn = utils.SVDKL(cfg.obs_dim + cfg.action_dim, cfg.mlp_dim, 1).to(self.device)
+        self.rew_likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(num_tasks=1).to(self.device)
+        self.rew_mll = gpytorch.mlls.VariationalELBO(self.rew_likelihood, self.rew_fn.gp_layer, num_data=int(eval(cfg.train_steps)))
+
+        self.optim = torch.optim.Adam(
+            [
+                {'params': self.dynamics_model.feature_extractor.parameters()},
+                {'params': self.dynamics_model.gp_layer.hyperparameters(), 'lr': cfg.lr * 0.01},
+                {'params': self.dynamics_model.gp_layer.variational_parameters()},
+                {'params': self.q1_net.parameters()},
+                {'params': self.q2_net.parameters()},
+                {'params': self.rew_fn.feature_extractor.parameters()},
+                {'params': self.rew_fn.gp_layer.hyperparameters(), 'lr': cfg.lr * 0.01},
+                {'params': self.rew_fn.gp_layer.variational_parameters()},
+            ],
+            lr=self.cfg.lr
+        )
+
+        # Turn to eval
+        self.dynamics_model.eval()
+        self.dm_likelihood.eval()
+        self.rew_fn.eval()
+        self.rew_likelihood.eval()
+
+    def to_eval(self):
+        super().to_eval()
+        self.dm_likelihood.eval()
+        self.rew_likelihood.eval()
+
+    def to_train(self):
+        super().to_train()
+        self.dm_likelihood.train()
+        self.rew_likelihood.train()
+
+    def next(self, z, a):
+        """
+        Difference to the original method: use SVDKL, only access the mean function at inference time.
+        """
+        x = torch.cat([z, a], dim=-1)
+        pred_x = z + self.dynamics_model(x).mean 
+        pred_r = self.rew_fn(x).mean
+        return pred_x, pred_r
+    
+    def update(self, replay_buffer, step):
+        with torch.autograd.set_detect_anomaly(True):
+            obs, next_obses, action, reward, idxs, weights = replay_buffer.sample()
+
+            # Reset action to a leaf node
+            action = action.detach()
+
+            self.optim.zero_grad(set_to_none=True)
+            self.std = utils.linear_schedule(self.cfg.std_schedule, step)
+            
+            # Turn to train
+            self.to_train()
+
+            # Do not encode representation
+            z = [None] * (self.cfg.horizon + 1)
+            z[0] = obs.clone()
+
+            r_pred = [None] * self.cfg.horizon
+
+            batch_size = obs.size(0)
+            consistency_loss, reward_loss, value_loss, priority_loss = (torch.zeros(batch_size, device=obs.device),) * 4
+            
+            for t in range(self.cfg.horizon):
+                # Predictions
+                Q1, Q2 = self.q1_net(z[t], action[t]), self.q2_net(z[t], action[t])
+                z[t+1], r_pred[t] = self.next(z[t], action[t]) # z[t+1] is the prediction
+
+                next_obs = next_obses[t]
+                next_z = next_obs # no encoding (supposedly from target encoder)
+                td_target = self._td_target(next_obs, reward[t]).detach()
+
+                # Losses
+                rho = (self.cfg.rho ** t)
+                consistency_loss += rho * torch.mean(utils.mse(z[t+1], next_z), dim=1)
+                reward_loss += rho * utils.mse(r_pred[t], reward[t]).squeeze(1)
+                value_loss += rho * (utils.mse(Q1, td_target) + utils.mse(Q2, td_target)).squeeze(1)
+                priority_loss += rho * (utils.l1(Q1, td_target) + utils.l1(Q2, td_target)).squeeze(1)
+
+            input = torch.cat([z[0], action[0]], dim=-1)
+            dm_loss = -self.dm_mll(self.dynamics_model(input), next_obses[0])
+            rew_loss = -self.rew_mll(self.rew_fn(input), reward[0])
+
+            # Optimize model
+            total_loss = self.cfg.consistency_coef * consistency_loss.clamp(max=1e4) + \
+                        self.cfg.reward_coef * reward_loss.clamp(max=1e4) + \
+                        self.cfg.value_coef * value_loss.clamp(max=1e4)
+
+            weighted_loss = (total_loss * weights).mean() + self.cfg.consistency_coef * dm_loss.clamp(max=1e4) + self.cfg.reward_coef * rew_loss.clamp(max=1e4)
+            weighted_loss.register_hook(lambda grad: grad * (1/self.cfg.horizon)) 
+            weighted_loss.backward()
+
+            # Clip gradients
+            # torch.nn.utils.clip_grad_norm_(self.dynamics_model.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
+            torch.nn.utils.clip_grad_norm_(self.q1_net.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
+            torch.nn.utils.clip_grad_norm_(self.q2_net.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
+            # torch.nn.utils.clip_grad_norm_(self.rew_fn.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
+            torch.nn.utils.clip_grad_norm_(self.dynamics_model.feature_extractor.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
+            torch.nn.utils.clip_grad_norm_(self.dynamics_model.gp_layer.hyperparameters(), self.cfg.grad_clip_norm * 0.1, error_if_nonfinite=False)
+            torch.nn.utils.clip_grad_norm_(self.dynamics_model.variational_parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
+            torch.nn.utils.clip_grad_norm_(self.rew_fn.feature_extractor.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
+            torch.nn.utils.clip_grad_norm_(self.rew_fn.gp_layer.hyperparameters(), self.cfg.grad_clip_norm * 0.1, error_if_nonfinite=False)
+            torch.nn.utils.clip_grad_norm_(self.rew_fn.variational_parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
+
+            self.optim.step()
+            
+            replay_buffer.update_priorities(idxs, priority_loss.clamp(max=1e4).detach())
+
+            # Update policy + target network
+            pi_loss = self.update_pi([z_t.detach() for z_t in z])
+            if step % self.cfg.update_freq == 0:
+                self.ema(self.cfg.tau)
+
+            # Turn to eval
+            self.to_eval()
+
+            # warm-up (for any necessary precomputation)
+            self.dynamics_model(torch.randn(1, self.cfg.obs_dim + self.cfg.action_dim, device=self.device))
+            self.rew_fn(torch.randn(1, self.cfg.obs_dim + self.cfg.action_dim, device=self.device))
+
+            return {
+                'consistency_loss': float(consistency_loss.mean().item()),
+                'reward_loss': float(reward_loss.mean().item()),
+                'value_loss': float(value_loss.mean().item()),
+                'pi_loss': pi_loss,
+                'total_loss': float(total_loss.mean().item()),
+                'weighted_loss': float(weighted_loss.mean().item())
+            }

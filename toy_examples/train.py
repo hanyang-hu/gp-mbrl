@@ -8,7 +8,7 @@ import gymnasium as gym
 import torch.backends
 import tqdm
 
-from agent import TDMPC
+from agent import TDMPC, GPTDMPC
 from utils import Episode, ReplayBuffer
 
 
@@ -50,21 +50,25 @@ def evaluate(env, agent, num_episodes, step, episode_length, action_repeat, rend
     return np.nanmean(episode_rewards)
 
 
-def train(cfg_path = "./default.yaml"):
+def train(cfg_path = "./default.yaml", seed=None):
     cfg = OmegaConf.load(cfg_path)
     
     # Set random seeds for reproducibility
+    if seed is not None:
+        cfg.seed = seed
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
     random.seed(cfg.seed)
-    torch.use_deterministic_algorithms(True) # set CUBLAS_WORKSPACE_CONFIG=:4096:8 (for Windows)
+    if cfg.determinism:
+        torch.use_deterministic_algorithms(True) # set CUBLAS_WORKSPACE_CONFIG=:4096:8 (for Windows)
 
     env = gym.make(cfg.task, render_mode="rgb_array")
     cfg.obs_dim = env.observation_space.shape[0]
     cfg.action_dim = env.action_space.shape[0]
     cfg.action_lower_bound = (env.action_space.low).tolist()
     cfg.action_upper_bound = (env.action_space.high).tolist()
-    agent = TDMPC(cfg)
+    # agent = TDMPC(cfg)
+    agent = GPTDMPC(cfg)
     buffer = ReplayBuffer(cfg)
 
     # Run training (adapted from https://github.com/nicklashansen/tdmpc/)
@@ -72,7 +76,7 @@ def train(cfg_path = "./default.yaml"):
     episode_idx, start_time = 0, time.time()
     for step in range(0, cfg.train_steps+cfg.episode_length, cfg.episode_length):
         # Collect trajectory
-        obs, _ = env.reset(seed=cfg.seed)
+        obs, _ = env.reset(seed=cfg.seed+step)
         agent.reset_correction() # do nothing for TD-MPC
         episode = Episode(cfg, obs)
 
@@ -96,6 +100,7 @@ def train(cfg_path = "./default.yaml"):
         # Update model
         if step >= cfg.seed_steps:
             num_updates = cfg.seed_steps if step == cfg.seed_steps else cfg.episode_length
+            num_updates //= 2 # half the number of updates for GPTDMPC
             progress_bar = tqdm.tqdm(range(num_updates), desc=f"Episode {episode_idx}")
             for _ in progress_bar:
                 loss = agent.update(buffer, step)
@@ -137,4 +142,11 @@ def train(cfg_path = "./default.yaml"):
     print(f"Training metrics saved to ./results/{cfg.task}/metrics_{cfg.exp_name}_{cfg.seed}.csv")
 
 if __name__ == "__main__":
-    train()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Train TD-MPC")
+    parser.add_argument("--cfg_path", type=str, default="./default.yaml", help="Path to config file")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed")
+    args = parser.parse_args()
+
+    train(args.cfg_path, args.seed)
