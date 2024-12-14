@@ -117,10 +117,18 @@ class SVDKL(gpytorch.Module):
     
 
 class DKL(gpytorch.models.ExactGP):
-    def __init__(self, input_dim, hidden_dim, output_dim, 
-                 likelihood=gpytorch.likelihoods.GaussianLikelihood(), 
+    def __init__(self, input_dim, hidden_dim, output_dim, likelihood=None, 
                  grid_bound=(-1., 1.), ski_dim=2, grid_size=32):
-        super(DKL, self).__init__(train_inputs=None, train_targets=None, likelihood=likelihood)
+        # Generate dummy data to initialize the model
+        dummy_train_inputs = torch.zeros(input_dim, 10)
+        dummy_train_targets = torch.zeros(output_dim, 10)
+        if likelihood is None:
+            likelihood = gpytorch.likelihoods.GaussianLikelihood(batch_shape=torch.Size([output_dim]))
+        super(DKL, self).__init__(
+            train_inputs=dummy_train_inputs, 
+            train_targets=dummy_train_targets, 
+            likelihood=likelihood
+        )
 
         self.output_dim, self.ski_dim = output_dim, ski_dim
         self.feature_extractor = FeatureExtractor(input_dim, hidden_dim, ski_dim * output_dim)
@@ -135,9 +143,6 @@ class DKL(gpytorch.models.ExactGP):
                 gpytorch.kernels.SpectralMixtureKernel(
                     ard_num_dims=ski_dim,
                     batch_shape=torch.Size([output_dim]),
-                    lengthscale_prior=gpytorch.priors.SmoothedBoxPrior(
-                        math.exp(-1), math.exp(1), sigma=0.1, transform=torch.exp
-                    ),
                     num_mixtures=4,
                 ),
                 batch_shape=torch.Size([output_dim]),
@@ -161,6 +166,29 @@ class DKL(gpytorch.models.ExactGP):
         covar = self.covar_module(x)
         return gpytorch.distributions.MultivariateNormal(mean, covar)
     
+
+def construct_M0(k_ZZ, noises):
+    """
+    Compute M_0 = (\sigma^2 K_ZZ^{-1} + I)^{-1} = K_ZZ (K_ZZ + \sigma^2 I)^{-1}.
+    This is form the simple identity that (I+A^{-1})^{-1} = A(A+I)^{-1}.
+    TODO: Try to solve with conjugate gradient
+    """
+    I = torch.zeros_like(k_ZZ) + torch.eye(k_ZZ.size(-1), device=k_ZZ.device)
+    hat_k_ZZ = k_ZZ + noises**2 * I
+    return k_ZZ @ torch.inverse(hat_k_ZZ)
+
+
+def get_w_x(idx, value, num_inducing):
+    """
+    Obtain the sparse interpolation vector w_x (batched) given indices and values.
+    Input: idx (batch_size, num_interp), value (batch_size, num_interp)
+    Output: a torch.sparse_ooc_tensor w_x (batch_size, num_inducing) 
+    """
+    batch_size = idx.size(0)
+    batch_idx = torch.arange(batch_size, device=idx.device).unsqueeze(-1).expand_as(idx)
+    idx = torch.cat([batch_idx.unsqueeze(-1), idx.unsqueeze(-1)], dim=-1).reshape(-1, 2).t()
+    value = value.reshape(-1)
+    return torch.sparse_coo_tensor(idx, value, (batch_size, num_inducing))
 
 class QNet(nn.Module):
     """Q-network with LayerNorm"""

@@ -50,9 +50,9 @@ tau: 0.01
 rew_beta: 5e-4
 
 # gp-learning
-gp_update_num: 20
-gp_update_per_iter: 2
-gp_subsample_size: 2 * ${train_steps}/${gp_update_num}
+gp_update_num: 40
+gp_update_per_iter: 1
+gp_subsample_size: 4 * ${train_steps}/(${gp_update_num} * ${gp_update_per_iter})
 
 # architecture
 enc_dim: 256

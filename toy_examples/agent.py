@@ -4,6 +4,8 @@ import torch
 import numpy as np
 import warnings
 
+import gpytorch
+import tqdm
 
 class Agent():
     """
@@ -327,24 +329,26 @@ class MOPOC(TDMPC):
     Build on top of TD-MPC with online correction based on Gaussian Processes.
     Update Gaussian Processes when updating the target networks. (i.e. follow cfg.update_freq)
     """
-    def __init__(self, cfg):
+    def __init__(self, cfg, grid_size=16):
         super().__init__(cfg)
 
-        import gpytorch
+        self.grid_size = grid_size
 
         # Deep Dynamics Kernel
-        self.dynamics_likelihood = gpytorch.likelihoods.GaussianLikelihood().to(self.device)
+        self.dynamics_likelihood = gpytorch.likelihoods.GaussianLikelihood(batch_shape=torch.Size([cfg.obs_dim])).to(self.device)
         self.dynamics_gp = utils.DKL(
             cfg.obs_dim + cfg.action_dim, cfg.mlp_dim, cfg.obs_dim,
-            likelihood=self.dynamics_likelihood
+            likelihood=self.dynamics_likelihood,
+            grid_size=self.grid_size
         ).to(self.device)
         self.dynamics_gp_mll = gpytorch.mlls.ExactMarginalLogLikelihood(self.dynamics_gp.likelihood, self.dynamics_gp)
 
         # Deep Reward Kernel
-        self.rew_likelihood = gpytorch.likelihoods.GaussianLikelihood().to(self.device)
+        self.rew_likelihood = gpytorch.likelihoods.GaussianLikelihood(batch_shape=torch.Size([1])).to(self.device)
         self.rew_gp = utils.DKL(
             cfg.obs_dim + cfg.action_dim, cfg.mlp_dim, 1,
-            likelihood=self.rew_likelihood
+            likelihood=self.rew_likelihood,
+            grid_size=self.grid_size
         ).to(self.device)
         self.rew_gp_mll = gpytorch.mlls.ExactMarginalLogLikelihood(self.rew_gp.likelihood, self.rew_gp)
 
@@ -368,6 +372,97 @@ class MOPOC(TDMPC):
         self.rew_gp.eval()
         self.rew_likelihood.eval()
 
+        # Construct batched cache matrix M_0
+        self.construct_M0()
+
+    @torch.no_grad()
+    def construct_M0(self):
+        grid_coor = self.dynamics_gp.covar_module.grid[0] # assumme grid is the same for both dynamics and reward
+        Z = torch.cartesian_prod(grid_coor, grid_coor) # obtain inducing points
+        
+        k_ZZ = self.dynamics_gp.covar_module(Z).to_dense().detach()
+        noises = self.dynamics_gp.likelihood.noise.detach().unsqueeze(-1)
+        self.dm_M = utils.construct_M0(k_ZZ, noises).to(self.device)
+        self.dm_Wv = torch.zeros(self.cfg.obs_dim, Z.shape[0], 1).to(self.device) # caching W^T v \in R^m
+        self.dm_MWv = torch.zeros(self.cfg.obs_dim, Z.shape[0], 1).to(self.device) # caching M W^T v \in R^m
+
+        k_ZZ = self.rew_gp.covar_module(Z).to_dense().detach()
+        noises = self.rew_gp.likelihood.noise.detach().unsqueeze(-1)
+        self.rew_M = utils.construct_M0(k_ZZ, noises).to(self.device)
+        self.rew_Wv = torch.zeros(1, Z.shape[0], 1).to(self.device) # caching W^T v \in R^m
+        self.rew_MWv = torch.zeros(1, Z.shape[0], 1).to(self.device) # caching M W^T v \in R^m
+
+        # Load memory to cache
+        if self.current_step > 0:
+            progress_bar = tqdm.tqdm(range(0, self.current_step + 1), desc="Loading Memory to Caches")
+            for i in progress_bar:
+                input = torch.cat([self.memory["obs"][i], self.memory["act"][i]], dim=-1)
+                next_obs = self.memory["next_obs"][i]
+                rew = self.memory["rew"][i]
+
+                self.update_dm_cache(input, next_obs)
+                self.update_rew_cache(input, rew)
+
+    @torch.no_grad()
+    def update_dm_cache(self, input, next_obs):
+        """
+        TODO: Leverage the sparsity to speedup computation
+        """
+        gp_input = self.dynamics_gp.feature_extractor(input)
+        gp_input = gp_input.reshape(self.cfg.obs_dim, 2, -1).permute(0, 2, 1)
+        gp_input = self.dynamics_gp.scale_to_bounds(gp_input)
+
+        idx, value = self.dynamics_gp.covar_module._compute_grid(gp_input) # idx, value are of the shape (output_dim, 1, K) where K is a constant integer
+        idx, value = idx.squeeze(1), value.squeeze(1)
+        v = next_obs - self.dynamics_model(input) # the correction (residual) term
+        w_t = utils.get_w_x(idx, value, self.grid_size**2).to_dense().unsqueeze(-1) 
+        Mw_t = torch.bmm(self.dm_M, w_t) 
+        self.dm_M = self.dm_M + \
+                        1 / (1 + torch.bmm(w_t.permute(0, 2, 1), Mw_t)) * \
+                        torch.bmm(Mw_t, Mw_t.permute(0, 2, 1)) # outer product
+        self.dm_Wv = self.dm_Wv + w_t * v
+        self.dm_MWv = torch.bmm(self.dm_M, self.dm_Wv)
+
+    @torch.no_grad()
+    def update_rew_cache(self, input, rew):
+        """
+        TODO: Leverage the sparsity to speedup computation
+        """
+        gp_input = self.rew_gp.feature_extractor(input)
+        gp_input = gp_input.reshape(1, 2, -1).permute(0, 2, 1)
+        gp_input = self.rew_gp.scale_to_bounds(gp_input)
+
+        idx, value = self.rew_gp.covar_module._compute_grid(gp_input)
+        idx, value = idx.squeeze(1), value.squeeze(1)
+        v = rew - self.rew_fn(input)
+        w_t = utils.get_w_x(idx, value, self.grid_size**2).to_dense().unsqueeze(-1)
+        Mw_t = torch.bmm(self.rew_M, w_t)
+        self.rew_M = self.rew_M + \
+                        1 / (1 + torch.bmm(w_t.permute(0, 2, 1), Mw_t)) * \
+                        torch.bmm(Mw_t, Mw_t.permute(0, 2, 1))
+        self.rew_Wv = self.rew_Wv + w_t * v
+        self.rew_MWv = torch.bmm(self.rew_M, self.rew_Wv)
+
+    @torch.no_grad()
+    def correction(self, obs, act, rew, next_obs, step):
+        """
+        Update cache matrix M_t and W^T v and their product for both dynamics and reward.
+        """
+        super().correction(obs, act, rew, next_obs, step)
+
+        obs = torch.tensor(obs).to(self.device)
+        act = act.detach().to(self.device)
+        next_obs = torch.tensor(next_obs).to(self.device)
+        rew = torch.tensor(rew).to(self.device)
+
+        input = torch.cat([obs, act], dim=-1)
+
+        self.update_dm_cache(input, next_obs)
+        self.update_rew_cache(input, rew)        
+
+    def corrected_next(self, z, a):
+        pass
+
     def to_eval(self):
         super().to_eval()
 
@@ -384,10 +479,7 @@ class MOPOC(TDMPC):
         self.rew_gp.train()
         self.rew_likelihood.train()
 
-    # def correction(self, obs, act, rew, next_obs, done):
-    #     pass
-
-    def update_gp(self):
+    def update_gp_prior(self):
         self.to_train()
 
         # Compute GP loss over memory

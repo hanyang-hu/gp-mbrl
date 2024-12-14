@@ -104,11 +104,15 @@ def train(cfg_path = "./default.yaml", seed=None):
                 loss = agent.update(buffer, step)
                 post_dict = {"Weighted Loss": loss["weighted_loss"]}
                 progress_bar.set_postfix(post_dict)
-            progress_bar = tqdm.tqdm(range(cfg.gp_update_num), desc=f"Episode {episode_idx} (GP Update)")
-            for _ in progress_bar:
-                loss = agent.update_gp()
-                post_dict = {"GP Loss": loss}
-                progress_bar.set_postfix(post_dict)
+            if isinstance(agent, MOPOC):
+                # Update kernel hyperparameters
+                progress_bar = tqdm.tqdm(range(cfg.gp_update_num), desc=f"Episode {episode_idx} (Prior Update)")
+                for _ in progress_bar:
+                    loss = agent.update_gp_prior()
+                    post_dict = {"GP Loss": loss}
+                    progress_bar.set_postfix(post_dict)
+                # Compute cache matrix M_0 based on memory
+                agent.construct_M0() 
 
         # Log training episode
         episode_idx += 1
@@ -123,10 +127,10 @@ def train(cfg_path = "./default.yaml", seed=None):
         update_metric(train_metrics, common_metrics)
         try:
             print(f"Episode {episode_idx}:\n    Env Step: {env_step+len(episode)},\n    Total Time: {time.time() - start_time:.2f}s,\n    Episode Reward: {common_metrics['episode_reward']:.2f}\n    Horizon: {agent._prev_mean.shape}")
-            print(f"    'reward center': {agent.rew_ctr:.2f}")
+            print(f"    Reward Center: {agent.rew_ctr:.2f}")
         except:
             print(f"Episode {episode_idx}:\n    Env Step: {env_step+len(episode)},\n    Total Time: {time.time() - start_time:.2f}s,\n    Episode Reward: {common_metrics['episode_reward']:.2f}")
-            print(f"    'reward center': {agent.rew_ctr:.2f}")
+            print(f"    Reward Center: {agent.rew_ctr:.2f}")
 
         # Evaluate and visualize agent periodically
         if cfg.eval and env_step != 0 and env_step % cfg.eval_freq == 0:
