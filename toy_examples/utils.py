@@ -116,6 +116,52 @@ class SVDKL(gpytorch.Module):
         return self.gp_layer(x)
     
 
+class DKL(gpytorch.models.ExactGP):
+    def __init__(self, input_dim, hidden_dim, output_dim, 
+                 likelihood=gpytorch.likelihoods.GaussianLikelihood(), 
+                 grid_bound=(-1., 1.), ski_dim=2, grid_size=32):
+        super(DKL, self).__init__(train_inputs=None, train_targets=None, likelihood=likelihood)
+
+        self.output_dim, self.ski_dim = output_dim, ski_dim
+        self.feature_extractor = FeatureExtractor(input_dim, hidden_dim, ski_dim * output_dim)
+        
+        grid_bounds = [grid_bound,] * ski_dim
+        self.grid_bounds = grid_bounds
+        self.scale_to_bounds = gpytorch.utils.grid.ScaleToBounds(grid_bound[0], grid_bound[1])
+
+        self.mean_module = gpytorch.means.ConstantMean(batch_shape=torch.Size([output_dim]))
+        self.covar_module = gpytorch.kernels.GridInterpolationKernel(
+            gpytorch.kernels.ScaleKernel(
+                gpytorch.kernels.SpectralMixtureKernel(
+                    ard_num_dims=ski_dim,
+                    batch_shape=torch.Size([output_dim]),
+                    lengthscale_prior=gpytorch.priors.SmoothedBoxPrior(
+                        math.exp(-1), math.exp(1), sigma=0.1, transform=torch.exp
+                    ),
+                    num_mixtures=4,
+                ),
+                batch_shape=torch.Size([output_dim]),
+            ),
+            num_dims=ski_dim,
+            grid_bounds=grid_bounds,
+            grid_size=grid_size,
+        )
+
+        self.apply(orthogonal_init)
+
+    def forward(self, x):
+        """
+        Input shape: (input_dim, batch_shape)
+        Output mean shape: (output_dim, batch_shape)
+        """
+        x = self.feature_extractor(x.t()).t()
+        x = x.reshape(self.output_dim, self.ski_dim, -1).permute(0, 2, 1)
+        x = self.scale_to_bounds(x)
+        mean = self.mean_module(x)
+        covar = self.covar_module(x)
+        return gpytorch.distributions.MultivariateNormal(mean, covar)
+    
+
 class QNet(nn.Module):
     """Q-network with LayerNorm"""
     def __init__(self, obs_dim, act_dim, hidden_dim):

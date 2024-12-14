@@ -1,6 +1,6 @@
 # environment
 task: "Pendulum-v1"
-exp_name: td_mpc_no_latent_ctr
+exp_name: mopoc_no_latent
 save_path: "models/${task}/${exp_name}_${seed}.pt"
 modality: 'state'
 action_repeat: 1
@@ -10,6 +10,7 @@ val_episode_length: 200/${action_repeat}
 train_steps: 10000/${action_repeat}
 
 # misc
+reward_centering: False # Did not see improvement with reward centering on Pendulum-v1
 determinism: True # Remark. True if need to reproduce the results
 seed: 42
 eval: True
@@ -46,7 +47,12 @@ grad_clip_norm: 10
 seed_steps: 200
 update_freq: 1
 tau: 0.01
-rew_beta: 5e-3
+rew_beta: 5e-4
+
+# gp-learning
+gp_update_num: 20
+gp_update_per_iter: 2
+gp_subsample_size: 2 * ${train_steps}/${gp_update_num}
 
 # architecture
 enc_dim: 256
@@ -57,4 +63,3 @@ latent_dim: 50
 use_wandb: false
 wandb_project: none
 wandb_entity: none
-

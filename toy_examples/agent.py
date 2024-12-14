@@ -35,13 +35,14 @@ class Agent():
         self.rew_fn = utils.MLP(obs_dim + cfg.action_dim, cfg.mlp_dim, 1).to(self.device)
         self.rew_ctr = 0.0
 
-        train_steps = int(eval(cfg.train_steps))
+        train_steps = int(eval(cfg.train_steps)) + int(eval(cfg.episode_length))
         self.memory = {
             "obs": torch.zeros((train_steps, cfg.obs_dim)).to(self.device),
             "act": torch.zeros((train_steps, cfg.action_dim)).to(self.device),
             "next_obs": torch.zeros((train_steps, cfg.obs_dim)).to(self.device),
             "rew": torch.zeros((train_steps, 1)).to(self.device)
         }
+        self.current_step = 0
 
         # Optimizer
         self.optim = torch.optim.Adam(
@@ -166,15 +167,13 @@ class Agent():
     def correction(self, obs, act, rew, next_obs, step):
         # Update memory
         self.memory["obs"][step] = torch.tensor(obs).to(self.device)
-        self.memory["act"][step] = act.to(self.device)
+        self.memory["act"][step] = act.detach().to(self.device)
         self.memory["rew"][step] = torch.tensor(rew).to(self.device)
         self.memory["next_obs"][step] = torch.tensor(next_obs).to(self.device)
+        self.current_step = step
 
         # Reward centering
         self.rew_ctr += self.cfg.rew_beta * (rew - self.rew_ctr)
-    
-    def reset_correction(self):
-        return
 
     def next(self, z, a):
         x = torch.cat([z, a], dim=-1)
@@ -252,7 +251,10 @@ class TDMPC(Agent):
             action = action.detach()
 
             # Centering reward signals
-            centered_reward = reward - self.rew_ctr
+            if self.cfg.reward_centering:
+                centered_reward = reward - self.rew_ctr
+            else:
+                centered_reward = reward
 
             self.optim.zero_grad(set_to_none=True)
             self.std = utils.linear_schedule(self.cfg.std_schedule, step)
@@ -328,19 +330,95 @@ class MOPOC(TDMPC):
     def __init__(self, cfg):
         super().__init__(cfg)
 
-        # TODO: Add GP models (dynamics and reward), Ornstein-Uhlenbeck process, memory (instead of replay buffer), etc.
+        import gpytorch
 
-    def correction(self, obs, act, rew, next_obs, done):
-        pass
+        # Deep Dynamics Kernel
+        self.dynamics_likelihood = gpytorch.likelihoods.GaussianLikelihood().to(self.device)
+        self.dynamics_gp = utils.DKL(
+            cfg.obs_dim + cfg.action_dim, cfg.mlp_dim, cfg.obs_dim,
+            likelihood=self.dynamics_likelihood
+        ).to(self.device)
+        self.dynamics_gp_mll = gpytorch.mlls.ExactMarginalLogLikelihood(self.dynamics_gp.likelihood, self.dynamics_gp)
 
-    def reset_correction(self):
-        pass
+        # Deep Reward Kernel
+        self.rew_likelihood = gpytorch.likelihoods.GaussianLikelihood().to(self.device)
+        self.rew_gp = utils.DKL(
+            cfg.obs_dim + cfg.action_dim, cfg.mlp_dim, 1,
+            likelihood=self.rew_likelihood
+        ).to(self.device)
+        self.rew_gp_mll = gpytorch.mlls.ExactMarginalLogLikelihood(self.rew_gp.likelihood, self.rew_gp)
 
-    def next(self, z, a):
-        pass
+        self.gp_optim = torch.optim.Adam(
+            [
+                {'params': self.dynamics_gp.feature_extractor.parameters(), 'weight_decay': 1e-4},
+                {'params': self.dynamics_gp.mean_module.parameters()},
+                {'params': self.dynamics_gp.covar_module.parameters(), 'lr': cfg.lr},
+                {'params': self.dynamics_likelihood.parameters(), 'lr': cfg.lr},
+                {'params': self.rew_gp.feature_extractor.parameters(), 'weight_decay': 1e-4},
+                {'params': self.rew_gp.mean_module.parameters()},
+                {'params': self.rew_gp.covar_module.parameters(), 'lr': cfg.lr},
+                {'params': self.rew_likelihood.parameters(), 'lr': cfg.lr},
+            ],
+            lr=self.cfg.lr
+        )
 
-    def update(self, replay_buffer, step):
-        pass
+        # Turn to eval
+        self.dynamics_gp.eval()
+        self.dynamics_likelihood.eval()
+        self.rew_gp.eval()
+        self.rew_likelihood.eval()
+
+    def to_eval(self):
+        super().to_eval()
+
+        self.dynamics_gp.eval()
+        self.dynamics_likelihood.eval()
+        self.rew_gp.eval()
+        self.rew_likelihood.eval()
+
+    def to_train(self):
+        super().to_train()
+
+        self.dynamics_gp.train()
+        self.dynamics_likelihood.train()
+        self.rew_gp.train()
+        self.rew_likelihood.train()
+
+    # def correction(self, obs, act, rew, next_obs, done):
+    #     pass
+
+    def update_gp(self):
+        self.to_train()
+
+        # Compute GP loss over memory
+        inputs = torch.cat([self.memory["obs"][:self.current_step+1], self.memory["act"][:self.current_step+1]], dim=-1)
+        dm_targets = self.memory["next_obs"][:self.current_step+1] - self.memory["obs"][:self.current_step+1]
+        rew_targets = self.memory["rew"][:self.current_step+1]
+
+        # Subsample data to maintain computational efficiency (TODO: Use InfoRS instead of random sampling)
+        subsample_size = min(inputs.size(0), int(eval(self.cfg.gp_subsample_size)))
+        idxs = torch.randperm(inputs.size(0))[:subsample_size]
+        inputs, dm_targets, rew_targets = inputs[idxs], dm_targets[idxs], rew_targets[idxs]
+        
+        inputs, dm_targets, rew_targets = inputs.t(), dm_targets.t(), rew_targets.t()
+
+        self.dynamics_gp.set_train_data(inputs, dm_targets, strict=False)
+        self.rew_gp.set_train_data(inputs, rew_targets, strict=False)
+
+        for _ in range(self.cfg.gp_update_per_iter):
+            self.gp_optim.zero_grad(set_to_none=True)
+
+            dm_gp_loss = -self.dynamics_gp_mll(self.dynamics_gp(inputs), dm_targets).mean()
+            rew_gp_loss = -self.rew_gp_mll(self.rew_gp(inputs), rew_targets).mean()
+
+            # Optimize GP
+            gp_loss = dm_gp_loss + rew_gp_loss
+            gp_loss.backward()
+            self.gp_optim.step()
+
+        self.to_eval()
+
+        return gp_loss.item()
 
 
 
@@ -355,7 +433,7 @@ class GPTDMPC(Agent):
         1. Implement correction and reset_correction method
     """
     def __init__(self, cfg):
-        warnings.warn("GPTDMPC is not working as expected. Use TDMPC/MOPOC instead.")
+        warnings.warn("GPTDMPC is not working as expected (and is deprecated). Use TDMPC/MOPOC instead.")
 
         import gpytorch
 

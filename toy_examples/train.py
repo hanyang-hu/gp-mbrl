@@ -7,8 +7,9 @@ from omegaconf import OmegaConf
 import gymnasium as gym
 import torch.backends
 import tqdm
+import warnings
 
-from agent import TDMPC
+from agent import TDMPC, MOPOC
 from utils import Episode, ReplayBuffer
 
 
@@ -28,7 +29,6 @@ def evaluate(env, agent, num_episodes, step, episode_length, action_repeat, rend
     for _ in range(num_episodes):
         obs, _ = env.reset()
         done, ep_reward, t = False, 0, 0
-        # agent.reset_correction()
         while not done and t < episode_length:
             action = agent.plan(obs, eval_mode=True, step=step, t0=t==0)
             reward, done = 0.0, False
@@ -67,7 +67,8 @@ def train(cfg_path = "./default.yaml", seed=None):
     cfg.action_dim = env.action_space.shape[0]
     cfg.action_lower_bound = (env.action_space.low).tolist()
     cfg.action_upper_bound = (env.action_space.high).tolist()
-    agent = TDMPC(cfg)
+    # agent = TDMPC(cfg)
+    agent = MOPOC(cfg)
     buffer = ReplayBuffer(cfg)
 
     # Run training (adapted from https://github.com/nicklashansen/tdmpc/)
@@ -76,7 +77,6 @@ def train(cfg_path = "./default.yaml", seed=None):
     for step in range(0, cfg.train_steps+cfg.episode_length, cfg.episode_length):
         # Collect trajectory
         obs, _ = env.reset(seed=cfg.seed+step)
-        agent.reset_correction() # do nothing for TD-MPC
         episode = Episode(cfg, obs)
 
         agent.to_eval() # fix statistics such as layernorm
@@ -102,11 +102,13 @@ def train(cfg_path = "./default.yaml", seed=None):
             progress_bar = tqdm.tqdm(range(num_updates), desc=f"Episode {episode_idx}")
             for _ in progress_bar:
                 loss = agent.update(buffer, step)
-                progress_bar.set_postfix(
-                    {
-                        "Weighted Loss": loss["weighted_loss"],
-                    }
-                )
+                post_dict = {"Weighted Loss": loss["weighted_loss"]}
+                progress_bar.set_postfix(post_dict)
+            progress_bar = tqdm.tqdm(range(cfg.gp_update_num), desc=f"Episode {episode_idx} (GP Update)")
+            for _ in progress_bar:
+                loss = agent.update_gp()
+                post_dict = {"GP Loss": loss}
+                progress_bar.set_postfix(post_dict)
 
         # Log training episode
         episode_idx += 1
@@ -120,10 +122,10 @@ def train(cfg_path = "./default.yaml", seed=None):
         }
         update_metric(train_metrics, common_metrics)
         try:
-            print(f"Episode {episode_idx}:\n    Step: {step},\n    Env Step: {env_step},\n    Total Time: {time.time() - start_time:.2f}s,\n    Episode Reward: {common_metrics['episode_reward']:.2f}\n    Horizon: {agent._prev_mean.shape}")
+            print(f"Episode {episode_idx}:\n    Env Step: {env_step+len(episode)},\n    Total Time: {time.time() - start_time:.2f}s,\n    Episode Reward: {common_metrics['episode_reward']:.2f}\n    Horizon: {agent._prev_mean.shape}")
             print(f"    'reward center': {agent.rew_ctr:.2f}")
         except:
-            print(f"Episode {episode_idx}:\n    Step: {step},\n    Env Step: {env_step},\n    Total Time: {time.time() - start_time:.2f}s,\n    Episode Reward: {common_metrics['episode_reward']:.2f}")
+            print(f"Episode {episode_idx}:\n    Env Step: {env_step+len(episode)},\n    Total Time: {time.time() - start_time:.2f}s,\n    Episode Reward: {common_metrics['episode_reward']:.2f}")
             print(f"    'reward center': {agent.rew_ctr:.2f}")
 
         # Evaluate and visualize agent periodically
@@ -150,6 +152,8 @@ def train(cfg_path = "./default.yaml", seed=None):
     print(f"Training metrics saved to ./results/{cfg.task}/metrics_{cfg.exp_name}_{cfg.seed}.csv")
 
 if __name__ == "__main__":
+    warnings.filterwarnings("ignore")
+
     import argparse
 
     parser = argparse.ArgumentParser(description="Train TD-MPC")
