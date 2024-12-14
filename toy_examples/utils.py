@@ -116,6 +116,51 @@ class SVDKL(gpytorch.Module):
         return self.gp_layer(x)
     
 
+class DKLv0(gpytorch.models.ExactGP):
+    def __init__(self, input_dim, hidden_dim, output_dim, likelihood=None, grid_bound=(-1., 1.)):
+        # Generate dummy data to initialize the model
+        dummy_train_inputs = torch.zeros(input_dim, 10)
+        dummy_train_targets = torch.zeros(output_dim, 10)
+        if likelihood is None:
+            likelihood = gpytorch.likelihoods.GaussianLikelihood(batch_shape=torch.Size([output_dim]))
+        super(DKLv0, self).__init__(
+            train_inputs=dummy_train_inputs, 
+            train_targets=dummy_train_targets, 
+            likelihood=likelihood
+        )
+
+        self.output_dim = output_dim
+        self.feature_extractor = FeatureExtractor(input_dim, hidden_dim, 2 * output_dim)
+        
+        grid_bounds = [grid_bound,] * 2
+        self.grid_bounds = grid_bounds
+        self.scale_to_bounds = gpytorch.utils.grid.ScaleToBounds(grid_bound[0], grid_bound[1])
+
+        self.mean_module = gpytorch.means.ConstantMean(batch_shape=torch.Size([output_dim]))
+        self.covar_module = gpytorch.kernels.ScaleKernel(
+            gpytorch.kernels.SpectralMixtureKernel(
+                ard_num_dims=2,
+                batch_shape=torch.Size([output_dim]),
+                num_mixtures=4,
+            ),
+            batch_shape=torch.Size([output_dim]),
+        )
+
+        self.apply(orthogonal_init)
+
+    def forward(self, x):
+        """
+        Input shape: (input_dim, batch_shape)
+        Output mean shape: (output_dim, batch_shape)
+        """
+        x = self.feature_extractor(x.t()).t()
+        x = x.reshape(self.output_dim, 2, -1).permute(0, 2, 1)
+        x = self.scale_to_bounds(x)
+        mean = self.mean_module(x)
+        covar = self.covar_module(x)
+        return gpytorch.distributions.MultivariateNormal(mean, covar)
+    
+
 class DKL(gpytorch.models.ExactGP):
     def __init__(self, input_dim, hidden_dim, output_dim, likelihood=None, 
                  grid_bound=(-1., 1.), ski_dim=2, grid_size=32):
@@ -175,20 +220,39 @@ def construct_M0(k_ZZ, noises):
     """
     I = torch.zeros_like(k_ZZ) + torch.eye(k_ZZ.size(-1), device=k_ZZ.device)
     hat_k_ZZ = k_ZZ + noises**2 * I
-    return k_ZZ @ torch.inverse(hat_k_ZZ)
+    inv_hat_k_ZZ = torch.cholesky_inverse(torch.linalg.cholesky(hat_k_ZZ))
+    return k_ZZ @ inv_hat_k_ZZ
 
 
 def get_w_x(idx, value, num_inducing):
     """
     Obtain the sparse interpolation vector w_x (batched) given indices and values.
-    Input: idx (batch_size, num_interp), value (batch_size, num_interp)
-    Output: a torch.sparse_ooc_tensor w_x (batch_size, num_inducing) 
     """
-    batch_size = idx.size(0)
-    batch_idx = torch.arange(batch_size, device=idx.device).unsqueeze(-1).expand_as(idx)
-    idx = torch.cat([batch_idx.unsqueeze(-1), idx.unsqueeze(-1)], dim=-1).reshape(-1, 2).t()
-    value = value.reshape(-1)
-    return torch.sparse_coo_tensor(idx, value, (batch_size, num_inducing))
+    if idx.dim() == 2:
+        """
+        Input: idx (output_dim, num_interp), value (output_dim, num_interp)
+        Output: a torch.sparse_ooc_tensor w_x (output_dim, num_inducing) 
+        """
+        output_dim = idx.size(0)
+        batch_idx = torch.arange(output_dim, device=idx.device).unsqueeze(-1).expand_as(idx)
+        idx = torch.cat([batch_idx.unsqueeze(-1), idx.unsqueeze(-1)], dim=-1).reshape(-1, 2).t()
+        value = value.reshape(-1)
+        return torch.sparse_coo_tensor(idx, value, (output_dim, num_inducing))
+    elif idx.dim() == 3:
+        """
+        Input: idx (output_dim, batch_size, num_interp), value (output_dim, batch_size, num_interp)
+        Output: a dense tensor w_x (output_dim, batch_size, num_inducing)
+        This outputs a dense tensor, which is not memory efficient.
+        TODO: Implement a memory efficient version outputing a sparse tensor.
+        """
+        flat_idx = idx.reshape(-1, idx.size(-1))
+        flat_value = value.reshape(-1)
+        w_x = get_w_x(flat_idx, flat_value, num_inducing)
+        w_x = w_x.to_dense().reshape(idx.size(0), idx.size(1), num_inducing)
+        return w_x
+    else:
+        raise ValueError("Invalid input shape for idx. Should be either 2D or 3D.")
+    
 
 class QNet(nn.Module):
     """Q-network with LayerNorm"""

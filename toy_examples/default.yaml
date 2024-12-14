@@ -52,7 +52,8 @@ rew_beta: 5e-4
 # gp-learning
 gp_update_num: 40
 gp_update_per_iter: 1
-gp_subsample_size: 4 * ${train_steps}/(${gp_update_num} * ${gp_update_per_iter})
+gp_subsample_size: 1000
+mem_subsample_size: 2000
 
 # architecture
 enc_dim: 256

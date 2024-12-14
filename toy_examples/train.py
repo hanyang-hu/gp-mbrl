@@ -9,7 +9,7 @@ import torch.backends
 import tqdm
 import warnings
 
-from agent import TDMPC, MOPOC
+from agent import TDMPC, MOPOC, MOPOCv0
 from utils import Episode, ReplayBuffer
 
 
@@ -68,7 +68,7 @@ def train(cfg_path = "./default.yaml", seed=None):
     cfg.action_lower_bound = (env.action_space.low).tolist()
     cfg.action_upper_bound = (env.action_space.high).tolist()
     # agent = TDMPC(cfg)
-    agent = MOPOC(cfg)
+    agent = MOPOCv0(cfg)
     buffer = ReplayBuffer(cfg)
 
     # Run training (adapted from https://github.com/nicklashansen/tdmpc/)
@@ -113,6 +113,15 @@ def train(cfg_path = "./default.yaml", seed=None):
                     progress_bar.set_postfix(post_dict)
                 # Compute cache matrix M_0 based on memory
                 agent.construct_M0() 
+            elif isinstance(agent, MOPOCv0):
+                # Update kernel hyperparameters
+                progress_bar = tqdm.tqdm(range(cfg.gp_update_num), desc=f"Episode {episode_idx} (Prior Update)")
+                for _ in progress_bar:
+                    loss = agent.update_gp_prior()
+                    post_dict = {"GP Loss": loss}
+                    progress_bar.set_postfix(post_dict)
+                # Compute cache
+                agent.construct_L()
 
         # Log training episode
         episode_idx += 1
