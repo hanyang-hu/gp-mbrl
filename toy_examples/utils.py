@@ -8,6 +8,8 @@ import torch.nn.functional as F
 import numpy as np
 import re
 
+from linear_operator.utils.interpolation import left_interp
+
 
 __REDUCE__ = lambda b: 'mean' if b else 'none'
 
@@ -171,10 +173,10 @@ class KISSGP(gpytorch.models.ExactGP):
         self.mean_module = gpytorch.means.ConstantMean(batch_shape=torch.Size([output_dim]))
         self.covar_module = gpytorch.kernels.GridInterpolationKernel(
             gpytorch.kernels.ScaleKernel(
-                gpytorch.kernels.SpectralMixtureKernel(
+                gpytorch.kernels.RBFKernel(
                     ard_num_dims=2,
                     batch_shape=torch.Size([output_dim]),
-                    num_mixtures=4,
+                    # num_mixtures=4,
                 ),
                 batch_shape=torch.Size([output_dim]),
             ),
@@ -182,7 +184,6 @@ class KISSGP(gpytorch.models.ExactGP):
             grid_bounds=grid_bounds,
             grid_size=grid_size,
         )
-
 
     def forward(self, x):
         mean = self.mean_module(x)
@@ -223,6 +224,26 @@ class DKL(torch.nn.Module):
         x = x.reshape(self.output_dim, self.ski_dim, -1).permute(0, 2, 1)
         x = self.scale_to_bounds(x)
         return self.gp_layer(x)
+    
+    def mean_inference(self, x):
+        x = self.feature_extractor(x.t()).t()
+        x = x.reshape(self.output_dim, self.ski_dim, -1).permute(0, 2, 1)
+        x = self.scale_to_bounds(x)
+
+        # Compute mean
+        test_mean = self.gp_layer.mean_module(x)
+
+        # Fetch WISKI mean cache, do inference
+        if self.gp_layer.prediction_strategy:
+            mean_cache = self.gp_layer.prediction_strategy.fantasy_mean_cache
+            test_interp_indices, test_interp_values = self.gp_layer.covar_module._compute_grid(x)
+
+            return test_mean + left_interp(test_interp_indices, test_interp_values, mean_cache).squeeze(-1)
+        else:
+            print("Did not find prediction strategy, use the default prediction.")
+            return self.gp_layer(x).mean
+
+        
     
 
 def construct_M0(k_ZZ, noises):

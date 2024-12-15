@@ -6,18 +6,18 @@ root_dir = "./results/"
 
 td_mpc_no_latent_filenames = [
     "/Pendulum-v1/metrics_td_mpc_no_latent_41.csv",
-    "/Pendulum-v1/metrics_td_mpc_no_latent_42.csv",
-    "/Pendulum-v1/metrics_td_mpc_no_latent_43.csv",
-    "/Pendulum-v1/metrics_td_mpc_no_latent_44.csv",
-    "/Pendulum-v1/metrics_td_mpc_no_latent_45.csv",
+    # "/Pendulum-v1/metrics_td_mpc_no_latent_42.csv",
+    # "/Pendulum-v1/metrics_td_mpc_no_latent_43.csv",
+    # "/Pendulum-v1/metrics_td_mpc_no_latent_44.csv",
+    # "/Pendulum-v1/metrics_td_mpc_no_latent_45.csv",
 ]
 
 mopoc_v0_filenames = [
-    "/Pendulum-v1/metrics_mopoc_v0_41.csv",
-    "/Pendulum-v1/metrics_mopoc_v0_42.csv",
-    "/Pendulum-v1/metrics_mopoc_v0_43.csv",
-    "/Pendulum-v1/metrics_mopoc_v0_44.csv",
-    "/Pendulum-v1/metrics_mopoc_v0_45.csv",
+    "/Pendulum-v1/metrics_mopoc_v1_41.csv",
+    # "/Pendulum-v1/metrics_mopoc_v1_42.csv",
+    # "/Pendulum-v1/metrics_mopoc_v1_43.csv",
+    # "/Pendulum-v1/metrics_mopoc_v1_44.csv",
+    # "/Pendulum-v1/metrics_mopoc_v1_45.csv",
 ]
 
 # read files

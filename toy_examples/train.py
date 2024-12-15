@@ -80,8 +80,9 @@ def train(cfg_path = "./default.yaml", seed=None):
         obs, _ = env.reset(seed=cfg.seed+step)
         episode = Episode(cfg, obs)
 
+        st = time.time()
         agent.to_eval() # fix statistics such as layernorm
-        with torch.no_grad(),  gpytorch.settings.fast_computations(), gpytorch.settings.fast_pred_var(), gpytorch.settings.max_root_decomposition_size(100):
+        with torch.no_grad(), gpytorch.settings.fast_pred_var(), gpytorch.settings.max_root_decomposition_size(128):
             while not episode.done:
                 action = agent.plan(obs, step=step, t0=episode.first)
                 reward, done = 0.0, False
@@ -97,6 +98,8 @@ def train(cfg_path = "./default.yaml", seed=None):
             assert len(episode) == cfg.episode_length
             agent.to_train()
             buffer += episode
+        et = time.time()
+        print(f"Collecting episode {episode_idx} took {et-st:.2f}s")
 
         # Update model
         if step >= cfg.seed_steps:

@@ -546,6 +546,7 @@ class MOPOCv0(TDMPC):
 class MOPOCv1(TDMPC):
     """
     Directly use DKL + WISKI for correction.
+    Slow, but may test the correctness of the implementation.
     """
     def __init__(self, cfg):
         super().__init__(cfg)
@@ -690,22 +691,31 @@ class MOPOCv1(TDMPC):
         self.rew_gp.eval()
         self.rew_gp.gp_layer(rew_gp_inputs)
     
+    @torch.no_grad()
     def update_dm_cache(self, input, target):
         gp_input = self.dynamics_gp.feature_extractor(input)
         gp_input = gp_input.reshape(self.cfg.obs_dim, 2, -1).permute(0, 2, 1)
         gp_input = self.dynamics_gp.scale_to_bounds(gp_input)
         target = target.t().unsqueeze(-1)
 
-        self.dynamics_gp.gp_layer = self.dynamics_gp.gp_layer.get_fantasy_model(gp_input, target)
+        try:
+            self.dynamics_gp.gp_layer = self.dynamics_gp.gp_layer.get_fantasy_model(gp_input, target)
+        except:
+            pass
 
+    @torch.no_grad()
     def update_rew_cache(self, input, target):
         gp_input = self.rew_gp.feature_extractor(input)
         gp_input = gp_input.reshape(1, 2, -1).permute(0, 2, 1)
         gp_input = self.rew_gp.scale_to_bounds(gp_input)
         target = target.t().unsqueeze(-1)
 
-        self.rew_gp.gp_layer = self.rew_gp.gp_layer.get_fantasy_model(gp_input, target)
+        try:
+            self.rew_gp.gp_layer = self.rew_gp.gp_layer.get_fantasy_model(gp_input, target)
+        except:
+            pass
 
+    @torch.no_grad()
     def correction(self, obs, act, rew, next_obs, step):
         """
         Update cache matrix M_t and W^T v and their product for both dynamics and reward.
@@ -725,22 +735,23 @@ class MOPOCv1(TDMPC):
         self.update_dm_cache(input, next_obs - obs - self.dynamics_model(input))
         self.update_rew_cache(input, rew - self.rew_fn(input))        
 
+    @torch.no_grad()
     def corrected_next(self, z, a):
         x = torch.cat([z, a], dim=-1)
 
         # original predictions
         z_pred = z + self.dynamics_model(x) 
         r_pred = self.rew_fn(x)
+        z_corr, r_corr = 0.0, 0.0
 
-        if not self.cache:
-            return z_pred, r_pred
-
-        # correction
-        z_corr = self.dynamics_gp(x.t()).mean.t()
-        r_corr = self.rew_gp(x.t()).mean.t()
+        # corrections
+        if self.cache:
+            z_corr = self.dynamics_gp.mean_inference(x.t()).t()
+            r_corr = self.rew_gp.mean_inference(x.t()).t()
 
         return z_pred + z_corr, r_pred + r_corr
 
+    @torch.no_grad()
     def estimate_value(self, z, actions, horizon):
         """
         Use the corrected_next method to estimate the value.
