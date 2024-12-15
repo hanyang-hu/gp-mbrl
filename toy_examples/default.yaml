@@ -50,7 +50,7 @@ tau: 0.01
 rew_beta: 5e-4
 
 # gp-learning
-gp_update_num: 100
+gp_update_num: 50
 gp_update_per_iter: 1
 gp_subsample_size: 512
 mem_subsample_size: 2000
