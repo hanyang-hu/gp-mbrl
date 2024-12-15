@@ -138,10 +138,9 @@ class DKLv0(gpytorch.models.ExactGP):
 
         self.mean_module = gpytorch.means.ConstantMean(batch_shape=torch.Size([output_dim]))
         self.covar_module = gpytorch.kernels.ScaleKernel(
-            gpytorch.kernels.SpectralMixtureKernel(
+            gpytorch.kernels.RBFKernel(
                 ard_num_dims=2,
                 batch_shape=torch.Size([output_dim]),
-                num_mixtures=4,
             ),
             batch_shape=torch.Size([output_dim]),
         )
@@ -161,19 +160,43 @@ class DKLv0(gpytorch.models.ExactGP):
         return gpytorch.distributions.MultivariateNormal(mean, covar)
     
 
-class DKL(gpytorch.models.ExactGP):
-    def __init__(self, input_dim, hidden_dim, output_dim, likelihood=None, 
-                 grid_bound=(-1., 1.), ski_dim=2, grid_size=32):
-        # Generate dummy data to initialize the model
-        dummy_train_inputs = torch.zeros(input_dim, 10)
-        dummy_train_targets = torch.zeros(output_dim, 10)
-        if likelihood is None:
-            likelihood = gpytorch.likelihoods.GaussianLikelihood(batch_shape=torch.Size([output_dim]))
-        super(DKL, self).__init__(
-            train_inputs=dummy_train_inputs, 
-            train_targets=dummy_train_targets, 
+class KISSGP(gpytorch.models.ExactGP):
+    def __init__(self, output_dim, grid_bounds=[(-1., 1.), (-1., 1.)], grid_size=32, likelihood=None):
+        super(KISSGP, self).__init__(
+            train_inputs=torch.zeros(output_dim, 10, 2),
+            train_targets=torch.zeros(output_dim, 10),
             likelihood=likelihood
         )
+
+        self.mean_module = gpytorch.means.ConstantMean(batch_shape=torch.Size([output_dim]))
+        self.covar_module = gpytorch.kernels.GridInterpolationKernel(
+            gpytorch.kernels.ScaleKernel(
+                gpytorch.kernels.SpectralMixtureKernel(
+                    ard_num_dims=2,
+                    batch_shape=torch.Size([output_dim]),
+                    num_mixtures=4,
+                ),
+                batch_shape=torch.Size([output_dim]),
+            ),
+            num_dims=2,
+            grid_bounds=grid_bounds,
+            grid_size=grid_size,
+        )
+
+
+    def forward(self, x):
+        mean = self.mean_module(x)
+        covar = self.covar_module(x)
+        return gpytorch.distributions.MultivariateNormal(mean, covar)
+
+
+class DKL(torch.nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, likelihood=None, 
+                 grid_bound=(-1., 1.), ski_dim=2, grid_size=16):
+        super(DKL, self).__init__()
+        
+        if likelihood is None:
+            likelihood = gpytorch.likelihoods.GaussianLikelihood(batch_shape=torch.Size([output_dim]))
 
         self.output_dim, self.ski_dim = output_dim, ski_dim
         self.feature_extractor = FeatureExtractor(input_dim, hidden_dim, ski_dim * output_dim)
@@ -182,19 +205,11 @@ class DKL(gpytorch.models.ExactGP):
         self.grid_bounds = grid_bounds
         self.scale_to_bounds = gpytorch.utils.grid.ScaleToBounds(grid_bound[0], grid_bound[1])
 
-        self.mean_module = gpytorch.means.ConstantMean(batch_shape=torch.Size([output_dim]))
-        self.covar_module = gpytorch.kernels.GridInterpolationKernel(
-            gpytorch.kernels.ScaleKernel(
-                gpytorch.kernels.SpectralMixtureKernel(
-                    ard_num_dims=ski_dim,
-                    batch_shape=torch.Size([output_dim]),
-                    num_mixtures=4,
-                ),
-                batch_shape=torch.Size([output_dim]),
-            ),
-            num_dims=ski_dim,
-            grid_bounds=grid_bounds,
+        self.gp_layer = KISSGP(
+            output_dim=output_dim, 
+            grid_bounds=grid_bounds, 
             grid_size=grid_size,
+            likelihood=likelihood
         )
 
         self.apply(orthogonal_init)
@@ -207,9 +222,7 @@ class DKL(gpytorch.models.ExactGP):
         x = self.feature_extractor(x.t()).t()
         x = x.reshape(self.output_dim, self.ski_dim, -1).permute(0, 2, 1)
         x = self.scale_to_bounds(x)
-        mean = self.mean_module(x)
-        covar = self.covar_module(x)
-        return gpytorch.distributions.MultivariateNormal(mean, covar)
+        return self.gp_layer(x)
     
 
 def construct_M0(k_ZZ, noises):

@@ -1,6 +1,6 @@
 # environment
 task: "Pendulum-v1"
-exp_name: mopoc_no_latent
+exp_name: mopoc_v0
 save_path: "models/${task}/${exp_name}_${seed}.pt"
 modality: 'state'
 action_repeat: 1
@@ -50,7 +50,7 @@ tau: 0.01
 rew_beta: 5e-4
 
 # gp-learning
-gp_update_num: 40
+gp_update_num: 50
 gp_update_per_iter: 1
 gp_subsample_size: 1000
 mem_subsample_size: 2000
@@ -64,3 +64,5 @@ latent_dim: 50
 use_wandb: false
 wandb_project: none
 wandb_entity: none
+
+

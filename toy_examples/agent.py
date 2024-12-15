@@ -415,7 +415,7 @@ class MOPOCv0(TDMPC):
         return gp_loss.item()
     
     @torch.no_grad()
-    def construct_L(self):
+    def compute_cache(self):
         self.cache = True
 
         # Fetch data from memory
@@ -460,29 +460,11 @@ class MOPOCv0(TDMPC):
     
     @torch.no_grad()
     def update_dm_cache(self, input, target):
-        """
-        TODO: Leverage the sparsity to speedup computation
-        TODO: (Important) Fix exploding entries.
-        """
         gp_input = self.dynamics_gp.feature_extractor(input)
         gp_input = gp_input.reshape(self.cfg.obs_dim, 2, -1).permute(0, 2, 1)
         gp_input = self.dynamics_gp.scale_to_bounds(gp_input)
 
-        idx, value = self.dynamics_gp.covar_module._compute_grid(gp_input) # idx, value are of the shape (output_dim, 1, K) where K is a constant integer
-        idx, value = idx.squeeze(1), value.squeeze(1)
-        v = target - self.dynamics_model(input) # the correction (residual) term
-        w_t = utils.get_w_x(idx, value, self.grid_size**2).to_dense().unsqueeze(-1) 
-        Mw_t = torch.bmm(self.dm_M, w_t) 
-        self.dm_M = self.dm_M + 1 / (1 + torch.bmm(w_t.permute(0, 2, 1), Mw_t)) * torch.bmm(Mw_t, Mw_t.permute(0, 2, 1)) 
-        self.dm_Wv = self.dm_Wv + w_t * v.reshape(-1, 1, 1)
-        self.dm_MWv = torch.bmm(self.dm_M, self.dm_Wv)
-
-        print("dot product: ", 1 + torch.bmm(w_t.permute(0, 2, 1), Mw_t))
-        print("w_t: ", w_t.norm())
-        print("Mw_t: ", Mw_t.norm())
-        print("M: ", self.dm_M.norm())
-        if torch.isnan(self.dm_MWv).any():
-            exit()
+        # TODO: Update cholesky decomposition L and dm_cache
 
     @torch.no_grad()
     def update_rew_cache(self, input, rew):
@@ -493,14 +475,7 @@ class MOPOCv0(TDMPC):
         gp_input = gp_input.reshape(1, 2, -1).permute(0, 2, 1)
         gp_input = self.rew_gp.scale_to_bounds(gp_input)
 
-        idx, value = self.rew_gp.covar_module._compute_grid(gp_input)
-        idx, value = idx.squeeze(1), value.squeeze(1)
-        v = rew - self.rew_fn(input)
-        w_t = utils.get_w_x(idx, value, self.grid_size**2).to_dense().unsqueeze(-1)
-        Mw_t = torch.bmm(self.rew_M, w_t)
-        self.rew_M = self.rew_M +  1 / (1 + torch.bmm(w_t.permute(0, 2, 1), Mw_t)) * torch.bmm(Mw_t, Mw_t.permute(0, 2, 1))
-        self.rew_Wv = self.rew_Wv + w_t * v
-        self.rew_MWv = torch.bmm(self.rew_M, self.rew_Wv)
+        # TODO: Update cholesky decomposition L and rew_cache
 
     @torch.no_grad()
     def correction(self, obs, act, rew, next_obs, step):
@@ -568,6 +543,217 @@ class MOPOCv0(TDMPC):
         return G
 
 
+class MOPOCv1(TDMPC):
+    """
+    Directly use DKL + WISKI for correction.
+    """
+    def __init__(self, cfg):
+        super().__init__(cfg)
+
+        # Deep Dynamics Kernel
+        self.dynamics_likelihood = gpytorch.likelihoods.GaussianLikelihood(batch_shape=torch.Size([cfg.obs_dim])).to(self.device)
+        self.dynamics_gp = utils.DKL(
+            cfg.obs_dim + cfg.action_dim, cfg.mlp_dim, cfg.obs_dim,
+            likelihood=self.dynamics_likelihood,
+        ).to(self.device)
+        self.dynamics_gp_mll = gpytorch.mlls.ExactMarginalLogLikelihood(
+            self.dynamics_gp.gp_layer.likelihood, 
+            self.dynamics_gp.gp_layer
+        )
+
+        # Deep Reward Kernel
+        self.rew_likelihood = gpytorch.likelihoods.GaussianLikelihood(batch_shape=torch.Size([1])).to(self.device)
+        self.rew_gp = utils.DKL(
+            cfg.obs_dim + cfg.action_dim, cfg.mlp_dim, 1,
+            likelihood=self.rew_likelihood,
+        ).to(self.device)
+        self.rew_gp_mll = gpytorch.mlls.ExactMarginalLogLikelihood(
+            self.rew_gp.gp_layer.likelihood, 
+            self.rew_gp.gp_layer
+        )
+
+        self.gp_optim = torch.optim.Adam(
+            [
+                {'params': self.dynamics_gp.feature_extractor.parameters(), 'weight_decay': 1e-4},
+                {'params': self.dynamics_gp.gp_layer.mean_module.parameters()},
+                {'params': self.dynamics_gp.gp_layer.covar_module.parameters(), 'lr': cfg.lr},
+                {'params': self.dynamics_likelihood.parameters(), 'lr': cfg.lr},
+                {'params': self.rew_gp.feature_extractor.parameters(), 'weight_decay': 1e-4},
+                {'params': self.rew_gp.gp_layer.mean_module.parameters()},
+                {'params': self.rew_gp.gp_layer.covar_module.parameters(), 'lr': cfg.lr},
+                {'params': self.rew_likelihood.parameters(), 'lr': cfg.lr},
+            ],
+            lr=self.cfg.lr
+        )
+
+        # Turn to eval
+        self.dynamics_gp.eval()
+        self.dynamics_likelihood.eval()
+        self.rew_gp.eval()
+        self.rew_likelihood.eval()
+
+        self.cache = False
+
+    def to_eval(self):
+        super().to_eval()
+
+        self.dynamics_gp.eval()
+        self.dynamics_likelihood.eval()
+        self.rew_gp.eval()
+        self.rew_likelihood.eval()
+
+    def to_train(self):
+        super().to_train()
+
+        self.dynamics_gp.train()
+        self.dynamics_likelihood.train()
+        self.rew_gp.train()
+        self.rew_likelihood.train()
+
+    def update_gp_prior(self):
+        self.to_train()
+
+        # Compute GP loss over memory
+        inputs = torch.cat([self.memory["obs"][:self.current_step+1], self.memory["act"][:self.current_step+1]], dim=-1)
+        dm_targets = self.memory["next_obs"][:self.current_step+1] - self.memory["obs"][:self.current_step+1] - self.dynamics_model(inputs).detach()
+        rew_targets = self.memory["rew"][:self.current_step+1] - self.rew_fn(inputs).detach()
+
+        # Subsample data to maintain computational efficiency (TODO: Use InfoRS instead of random sampling)
+        subsample_size = min(inputs.size(0), self.cfg.gp_subsample_size)
+        idxs = torch.randperm(inputs.size(0))[:subsample_size]
+        inputs, dm_targets, rew_targets = inputs[idxs], dm_targets[idxs], rew_targets[idxs]
+        
+        inputs, dm_targets, rew_targets = inputs.t(), dm_targets.t(), rew_targets.t()
+
+        for _ in range(self.cfg.gp_update_per_iter):
+            self.gp_optim.zero_grad(set_to_none=True)
+
+            # Set train data
+            dm_gp_inputs = self.dynamics_gp.feature_extractor(inputs.t()).t()
+            dm_gp_inputs = dm_gp_inputs.reshape(self.cfg.obs_dim, 2, -1).permute(0, 2, 1)
+            dm_gp_inputs = self.dynamics_gp.scale_to_bounds(dm_gp_inputs)
+
+            self.dynamics_gp.gp_layer.set_train_data(dm_gp_inputs, dm_targets, strict=False)
+
+            rew_gp_inputs = self.rew_gp.feature_extractor(inputs.t()).t()
+            rew_gp_inputs = rew_gp_inputs.reshape(1, 2, -1).permute(0, 2, 1)
+            rew_gp_inputs = self.rew_gp.scale_to_bounds(rew_gp_inputs)
+
+            self.rew_gp.gp_layer.set_train_data(rew_gp_inputs, rew_targets, strict=False)
+
+            dm_gp_loss = -self.dynamics_gp_mll(self.dynamics_gp.gp_layer(dm_gp_inputs), dm_targets).mean()
+            rew_gp_loss = -self.rew_gp_mll(self.rew_gp.gp_layer(rew_gp_inputs), rew_targets).mean()
+
+            # Optimize GP
+            gp_loss = dm_gp_loss + rew_gp_loss
+            gp_loss.backward()
+            self.gp_optim.step()
+
+        self.to_eval()
+
+        return gp_loss.item()
+    
+    @torch.no_grad()
+    def compute_cache(self):
+        self.cache = True
+
+        # Fetch data from memory
+        obs = self.memory["obs"][:self.current_step+1]
+        act = self.memory["act"][:self.current_step+1]
+        next_obs = self.memory["next_obs"][:self.current_step+1]
+        rew = self.memory["rew"][:self.current_step+1]
+
+        # Compute input and targets
+        inputs = torch.cat([obs, act], dim=-1)
+
+        dm_gp_inputs = self.dynamics_gp.feature_extractor(inputs).t()
+        dm_gp_inputs = dm_gp_inputs.reshape(self.cfg.obs_dim, 2, -1).permute(0, 2, 1)
+        dm_gp_inputs = self.dynamics_gp.scale_to_bounds(dm_gp_inputs)
+        dm_targets = next_obs - obs - self.dynamics_model(inputs)
+        dm_targets = dm_targets.t()
+
+        rew_gp_inputs = self.rew_gp.feature_extractor(inputs).t()
+        rew_gp_inputs = rew_gp_inputs.reshape(1, 2, -1).permute(0, 2, 1)
+        rew_gp_inputs = self.rew_gp.scale_to_bounds(rew_gp_inputs)
+        rew_targets = rew - self.rew_fn(inputs)
+        rew_targets = rew_targets.t()
+
+        # Set train data
+        self.dynamics_gp.train()
+        self.dynamics_gp.gp_layer.set_train_data(dm_gp_inputs, dm_targets, strict=False)
+        self.rew_gp.train()
+        self.rew_gp.gp_layer.set_train_data(rew_gp_inputs, rew_targets, strict=False)
+
+        # Make predictions and compute cache
+        self.dynamics_gp.eval()
+        self.dynamics_gp.gp_layer(dm_gp_inputs)
+        self.rew_gp.eval()
+        self.rew_gp.gp_layer(rew_gp_inputs)
+    
+    def update_dm_cache(self, input, target):
+        gp_input = self.dynamics_gp.feature_extractor(input)
+        gp_input = gp_input.reshape(self.cfg.obs_dim, 2, -1).permute(0, 2, 1)
+        gp_input = self.dynamics_gp.scale_to_bounds(gp_input)
+        target = target.t().unsqueeze(-1)
+
+        self.dynamics_gp.gp_layer = self.dynamics_gp.gp_layer.get_fantasy_model(gp_input, target)
+
+    def update_rew_cache(self, input, target):
+        gp_input = self.rew_gp.feature_extractor(input)
+        gp_input = gp_input.reshape(1, 2, -1).permute(0, 2, 1)
+        gp_input = self.rew_gp.scale_to_bounds(gp_input)
+        target = target.t().unsqueeze(-1)
+
+        self.rew_gp.gp_layer = self.rew_gp.gp_layer.get_fantasy_model(gp_input, target)
+
+    def correction(self, obs, act, rew, next_obs, step):
+        """
+        Update cache matrix M_t and W^T v and their product for both dynamics and reward.
+        """
+        super().correction(obs, act, rew, next_obs, step)
+
+        if not self.cache:
+            return
+
+        obs = torch.tensor(obs).to(self.device)
+        act = act.detach().to(self.device)
+        next_obs = torch.tensor(next_obs).to(self.device)
+        rew = torch.tensor(rew).to(self.device)
+
+        input = torch.cat([obs, act], dim=-1)
+
+        self.update_dm_cache(input, next_obs - obs - self.dynamics_model(input))
+        self.update_rew_cache(input, rew - self.rew_fn(input))        
+
+    def corrected_next(self, z, a):
+        x = torch.cat([z, a], dim=-1)
+
+        # original predictions
+        z_pred = z + self.dynamics_model(x) 
+        r_pred = self.rew_fn(x)
+
+        if not self.cache:
+            return z_pred, r_pred
+
+        # correction
+        z_corr = self.dynamics_gp(x.t()).mean.t()
+        r_corr = self.rew_gp(x.t()).mean.t()
+
+        return z_pred + z_corr, r_pred + r_corr
+
+    def estimate_value(self, z, actions, horizon):
+        """
+        Use the corrected_next method to estimate the value.
+        """
+        G, discount = 0, 1
+        for t in range(horizon):
+            z, reward = self.corrected_next(z, actions[t])
+            G += discount * reward
+            discount *= self.cfg.discount
+        G += discount * self.Q(z, self.pi(z, self.cfg.min_std)) # terminal value
+        return G
+
+
 class MOPOC(TDMPC):
     """
     Build on top of TD-MPC with online correction based on Gaussian Processes.
@@ -602,12 +788,12 @@ class MOPOC(TDMPC):
             [
                 {'params': self.dynamics_gp.feature_extractor.parameters(), 'weight_decay': 1e-4},
                 {'params': self.dynamics_gp.mean_module.parameters()},
-                {'params': self.dynamics_gp.covar_module.parameters(), 'lr': cfg.lr},
-                {'params': self.dynamics_likelihood.parameters(), 'lr': cfg.lr},
+                {'params': self.dynamics_gp.covar_module.parameters(), 'lr': cfg.lr * 0.1},
+                {'params': self.dynamics_likelihood.parameters(), 'lr': cfg.lr * 0.1},
                 {'params': self.rew_gp.feature_extractor.parameters(), 'weight_decay': 1e-4},
                 {'params': self.rew_gp.mean_module.parameters()},
-                {'params': self.rew_gp.covar_module.parameters(), 'lr': cfg.lr},
-                {'params': self.rew_likelihood.parameters(), 'lr': cfg.lr},
+                {'params': self.rew_gp.covar_module.parameters(), 'lr': cfg.lr * 0.1},
+                {'params': self.rew_likelihood.parameters(), 'lr': cfg.lr * 0.1},
             ],
             lr=self.cfg.lr
         )

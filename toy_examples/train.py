@@ -1,4 +1,5 @@
 import torch
+import gpytorch
 import numpy as np
 import random
 import time
@@ -9,7 +10,7 @@ import torch.backends
 import tqdm
 import warnings
 
-from agent import TDMPC, MOPOC, MOPOCv0
+from agent import TDMPC, MOPOC, MOPOCv0, MOPOCv1
 from utils import Episode, ReplayBuffer
 
 
@@ -68,7 +69,7 @@ def train(cfg_path = "./default.yaml", seed=None):
     cfg.action_lower_bound = (env.action_space.low).tolist()
     cfg.action_upper_bound = (env.action_space.high).tolist()
     # agent = TDMPC(cfg)
-    agent = MOPOCv0(cfg)
+    agent = MOPOCv1(cfg)
     buffer = ReplayBuffer(cfg)
 
     # Run training (adapted from https://github.com/nicklashansen/tdmpc/)
@@ -80,21 +81,22 @@ def train(cfg_path = "./default.yaml", seed=None):
         episode = Episode(cfg, obs)
 
         agent.to_eval() # fix statistics such as layernorm
-        while not episode.done:
-            action = agent.plan(obs, step=step, t0=episode.first)
-            reward, done = 0.0, False
-            for _ in range(cfg.action_repeat):
-                next_obs, r, d, _, _ = env.step(action.detach().cpu().numpy())
-                reward += r # accumulate reward over action repeat
-                done = done or d
-                if done:
-                    break
-            agent.correction(obs, action, reward, next_obs, step+len(episode))
-            obs = next_obs
-            episode += (obs, action, reward, done)
-        assert len(episode) == cfg.episode_length
-        agent.to_train()
-        buffer += episode
+        with torch.no_grad(),  gpytorch.settings.fast_computations(), gpytorch.settings.fast_pred_var(), gpytorch.settings.max_root_decomposition_size(100):
+            while not episode.done:
+                action = agent.plan(obs, step=step, t0=episode.first)
+                reward, done = 0.0, False
+                for _ in range(cfg.action_repeat):
+                    next_obs, r, d, _, _ = env.step(action.detach().cpu().numpy())
+                    reward += r # accumulate reward over action repeat
+                    done = done or d
+                    if done:
+                        break
+                agent.correction(obs, action, reward, next_obs, step+len(episode))
+                obs = next_obs
+                episode += (obs, action, reward, done)
+            assert len(episode) == cfg.episode_length
+            agent.to_train()
+            buffer += episode
 
         # Update model
         if step >= cfg.seed_steps:
@@ -113,7 +115,7 @@ def train(cfg_path = "./default.yaml", seed=None):
                     progress_bar.set_postfix(post_dict)
                 # Compute cache matrix M_0 based on memory
                 agent.construct_M0() 
-            elif isinstance(agent, MOPOCv0):
+            elif isinstance(agent, MOPOCv0) or isinstance(agent, MOPOCv1):
                 # Update kernel hyperparameters
                 progress_bar = tqdm.tqdm(range(cfg.gp_update_num), desc=f"Episode {episode_idx} (Prior Update)")
                 for _ in progress_bar:
@@ -121,7 +123,7 @@ def train(cfg_path = "./default.yaml", seed=None):
                     post_dict = {"GP Loss": loss}
                     progress_bar.set_postfix(post_dict)
                 # Compute cache
-                agent.construct_L()
+                agent.compute_cache()
 
         # Log training episode
         episode_idx += 1
