@@ -8,7 +8,9 @@ import torch.nn.functional as F
 import numpy as np
 import re
 
+import linear_operator
 from linear_operator.utils.interpolation import left_interp
+import warnings
 
 
 __REDUCE__ = lambda b: 'mean' if b else 'none'
@@ -149,6 +151,8 @@ class DKLv0(gpytorch.models.ExactGP):
 
         self.apply(orthogonal_init)
 
+        print("DKLv0 model initialized.")
+
     def forward(self, x):
         """
         Input shape: (input_dim, batch_shape)
@@ -186,6 +190,161 @@ class KISSGP(gpytorch.models.ExactGP):
         )
 
     def forward(self, x):
+        mean = self.mean_module(x)
+        covar = self.covar_module(x)
+        return gpytorch.distributions.MultivariateNormal(mean, covar)
+    
+
+
+class DKLOVC(gpytorch.models.ExactGP):
+    """
+    DKL with OVC cache for constant-time update and inference.
+    """
+    def __init__(
+            self, input_dim, hidden_dim, output_dim, likelihood=None,
+            num_inducing_points=128, latent_gp_dim=5, error_tol=1e-5
+        ):
+        # Generate dummy data to initialize the model
+        if likelihood is None:
+            likelihood = gpytorch.likelihoods.GaussianLikelihood(batch_shape=torch.Size([output_dim]))
+        super(DKLOVC, self).__init__(
+            train_inputs=None, 
+            train_targets=None, 
+            likelihood=likelihood
+        )
+
+        self.latent_gp_dim = latent_gp_dim
+        self.output_dim = output_dim
+        
+        self.feature_extractor = FeatureExtractor(input_dim, hidden_dim, output_dim * latent_gp_dim)
+        # self.feature_extractor = lambda x : x.view(1, -1).repeat(4, 1).t()
+        
+        grid_bound = (-1., 1.) # output of feature extractor is in (-1, 1) (due to the Tanh activation)
+        grid_bounds = [grid_bound,] * latent_gp_dim
+        self.grid_bounds = grid_bounds
+        # self.scale_to_bounds = gpytorch.utils.grid.ScaleToBounds(grid_bound[0], grid_bound[1])
+        self.scale_to_bounds = torch.nn.Tanh()
+
+        self.mean_module = gpytorch.means.ConstantMean(batch_shape=torch.Size([output_dim]))
+        self.covar_module = gpytorch.kernels.ScaleKernel(
+            gpytorch.kernels.RBFKernel(
+                # nu=2.5,
+                ard_num_dims=latent_gp_dim,
+                batch_shape=torch.Size([output_dim]),
+                # num_mixtures=4,
+            ),
+            batch_shape=torch.Size([output_dim]),
+        )
+
+        self.num_inducing_points = num_inducing_points
+        self.pseudo_inputs = None
+        self.error_tol = error_tol # error tolerance for pivoted cholesky decomposition
+
+        self.c = torch.nn.Parameter(
+            data=torch.zeros(self.output_dim, self.num_inducing_points),
+            requires_grad=False
+        )
+        self.C = torch.nn.Parameter(
+            data=torch.zeros(self.output_dim, self.num_inducing_points, self.num_inducing_points),
+            requires_grad=False
+        )
+        self.m_u = torch.nn.Parameter(
+            data=torch.zeros(self.output_dim, self.num_inducing_points),
+            requires_grad=False
+        )
+        self.S_u = torch.nn.Parameter(
+            data=torch.zeros(self.output_dim, self.num_inducing_points, self.num_inducing_points),
+            requires_grad=False
+        )
+        self.w = torch.nn.Parameter(
+            data=torch.zeros(self.output_dim, self.num_inducing_points),
+            requires_grad=False
+        )
+
+    @torch.no_grad()
+    def clear_cache(self, train_inputs, train_targets):
+        if not self.eval():
+            raise RuntimeError("Model must be in eval mode to update cache.")
+
+        self.c.fill_(0.0)
+        self.C.fill_(0.0)
+        self.m_u.fill_(0.0)
+        self.S_u.fill_(0.0)
+        self.w.fill_(0.0)
+
+        with linear_operator.settings.cholesky_jitter(1e-3):
+            self.update_cache(train_inputs, train_targets)
+
+    @torch.no_grad()
+    def update_cache(self, x, y):
+        if not self.eval():
+            raise RuntimeError("Model must be in eval mode to update cache.")
+        
+        x = self.feature_extractor(x).t()
+        x = x.reshape(self.output_dim, self.latent_gp_dim, -1).permute(0, 2, 1)
+        y = (y - self.mean_module(x)).unsqueeze(-1)
+        noise_inv = self.likelihood.noise ** -1
+        pseudo_inputs = None
+
+        try:
+            # select the inducing points
+            L, pivots = self.covar_module(x).pivoted_cholesky(
+                rank=self.num_inducing_points,
+                error_tol=self.error_tol,
+                return_pivots=True
+            )
+            rank = L.shape[-1]
+            pivots = pivots[:,:rank] # (output_dim, rank)
+            pivots = pivots.unsqueeze(-1).expand(self.output_dim, rank, self.latent_gp_dim)
+            new_pseudo_inputs = x.gather(1, pivots)
+
+            # OVC update
+            K_uv = self.covar_module(new_pseudo_inputs, x)
+            c = (K_uv.matmul(y).squeeze(-1).to_dense() * noise_inv)
+            C = K_uv.matmul(K_uv.transpose(-1, -2)).to_dense() * noise_inv.unsqueeze(-1)
+
+            # Compute m_u (do not compute S_u)
+            K_uu = self.covar_module(new_pseudo_inputs)
+            M = K_uu + C
+            v = M.solve(c.unsqueeze(-1))
+            m_u = K_uu.matmul(v).squeeze(-1).detach().to_dense()
+
+            # Compute cache w
+            w = K_uu.solve(m_u.unsqueeze(-1)).squeeze(-1).detach().to_dense()
+
+            # Update pseudo inputs
+            pseudo_inputs = new_pseudo_inputs
+
+        except:
+            print("Failed to update cache. Skippping update.")
+            return
+        
+        # Update cache
+        if pseudo_inputs is not None:
+            self.c = torch.nn.Parameter(c, requires_grad=False)
+            self.C = torch.nn.Parameter(C, requires_grad=False)
+            self.m_u = torch.nn.Parameter(m_u, requires_grad=False)
+            self.w = torch.nn.Parameter(w, requires_grad=False)
+            self.pseudo_inputs = pseudo_inputs
+
+
+    @torch.no_grad()
+    def mean_inference(self, x):
+        x = self.feature_extractor(x).t()
+        x = x.reshape(self.output_dim, self.latent_gp_dim, -1).permute(0, 2, 1)
+
+        mean = self.mean_module(x)
+        covar = self.covar_module(x, self.pseudo_inputs)
+
+        return mean + covar.matmul(self.w.unsqueeze(-1)).squeeze(-1)
+
+    def forward(self, x):
+        """
+        Input shape: (input_dim, batch_shape)
+        Output mean shape: (output_dim, batch_shape)
+        """
+        x = self.feature_extractor(x).t()
+        x = x.reshape(self.output_dim, self.latent_gp_dim, -1).permute(0, 2, 1)
         mean = self.mean_module(x)
         covar = self.covar_module(x)
         return gpytorch.distributions.MultivariateNormal(mean, covar)

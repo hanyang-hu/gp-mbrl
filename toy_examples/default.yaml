@@ -1,13 +1,13 @@
 # environment
 task: "Pendulum-v1"
-exp_name: mopoc_v1
+exp_name: mopoc_svgp
 save_path: "models/${task}/${exp_name}_${seed}.pt"
 modality: 'state'
 action_repeat: 1
 discount: 0.99
 episode_length: 200/${action_repeat}
 val_episode_length: 200/${action_repeat}
-train_steps: 10000/${action_repeat}
+train_steps: 6000/${action_repeat}
 
 # misc
 reward_centering: False # Did not see improvement with reward centering on Pendulum-v1
@@ -39,8 +39,8 @@ consistency_coef: 2
 rho: 0.5
 kappa: 0.1
 lr: 1e-3
-std_schedule: linear(0.5, ${min_std}, 4000)
-horizon_schedule: linear(1, ${horizon}, 4000)
+std_schedule: linear(0.5, ${min_std}, 2000)
+horizon_schedule: linear(1, ${horizon}, 2000)
 per_alpha: 0.6
 per_beta: 0.4
 grad_clip_norm: 10
@@ -50,10 +50,10 @@ tau: 0.01
 rew_beta: 5e-4
 
 # gp-learning
-gp_update_num: 50
+gp_update_num: 200
 gp_update_per_iter: 1
 gp_subsample_size: 512
-mem_subsample_size: 2000
+mem_subsample_size: 200
 
 # architecture
 enc_dim: 256

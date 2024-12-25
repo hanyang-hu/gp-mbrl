@@ -4,6 +4,8 @@ import torch
 import gpytorch
 import numpy as np
 import warnings
+import linear_operator
+import copy
 
 
 class Agent():
@@ -386,11 +388,13 @@ class MOPOCv0(TDMPC):
 
         # Compute GP loss over memory
         inputs = torch.cat([self.memory["obs"][:self.current_step+1], self.memory["act"][:self.current_step+1]], dim=-1)
-        dm_targets = self.memory["next_obs"][:self.current_step+1] - self.memory["obs"][:self.current_step+1]
-        rew_targets = self.memory["rew"][:self.current_step+1]
+        dm_targets = self.memory["next_obs"][:self.current_step+1] - self.memory["obs"][:self.current_step+1] - self.dynamics_model(inputs)
+        rew_targets = self.memory["rew"][:self.current_step+1] - self.rew_fn(inputs) 
 
         # Subsample data to maintain computational efficiency (TODO: Use InfoRS instead of random sampling)
         subsample_size = min(inputs.size(0), self.cfg.gp_subsample_size)
+        # weights = torch.linspace(1, 5, steps=inputs.size(0)) # preference for new memories
+        # idxs = torch.multinomial(weights, subsample_size, replacement=False)
         idxs = torch.randperm(inputs.size(0))[:subsample_size]
         inputs, dm_targets, rew_targets = inputs[idxs], dm_targets[idxs], rew_targets[idxs]
         
@@ -420,7 +424,16 @@ class MOPOCv0(TDMPC):
 
         # Fetch data from memory
         subsample_size = min(self.current_step + 1, self.cfg.mem_subsample_size)
-        indices = torch.randperm(self.current_step + 1)[:subsample_size]
+        # if self.current_step + 1 - self.cfg.episode_length >= 0:
+        #     indices = torch.randperm(self.current_step + 1 - self.cfg.episode_length)[:subsample_size]
+        #     indices = torch.cat([indices, torch.arange(self.current_step + 1 - self.cfg.episode_length, self.current_step + 1)], dim=0)
+        # else:
+        #     indices = torch.arange(self.current_step + 1 - self.cfg.episode_length, self.current_step + 1)
+        # subsample_size = indices.size(0)
+        # Sample indices with preference for later memories
+        weights = torch.linspace(1, 5, steps=self.current_step + 1) # preference for new memories
+        indices = torch.multinomial(weights, subsample_size, replacement=False)
+        print(f"Subsample size: {subsample_size}")
 
         obs = self.memory["obs"][indices]
         act = self.memory["act"][indices]
@@ -439,7 +452,7 @@ class MOPOCv0(TDMPC):
         batch_eyes = torch.eye(subsample_size, device=self.device).unsqueeze(0).expand(self.cfg.obs_dim, -1, -1)
         dm_K_hat = dm_K + noises * batch_eyes
         self.dm_L = torch.linalg.cholesky(dm_K_hat)
-        v = (next_obs - obs - self.dynamics_model(input)).t().unsqueeze(-1)
+        v = (next_obs - obs - self.dynamics_model(input)).t().unsqueeze(-1) # dynamics correction target
         dm_K_hat_inv = torch.cholesky_inverse(self.dm_L)
         self.dm_cache = torch.bmm(dm_K_hat_inv, v).squeeze(-1) # (obs_dim, batch_size)
 
@@ -453,10 +466,9 @@ class MOPOCv0(TDMPC):
         batch_eyes = torch.eye(subsample_size, device=self.device).unsqueeze(0).expand(1, -1, -1)
         rew_K_hat = rew_K + noises * batch_eyes
         self.rew_L = torch.linalg.cholesky(rew_K_hat)
-        v = (rew - self.rew_fn(input)).t().unsqueeze(-1)
+        v = (rew - self.rew_fn(input)).t().unsqueeze(-1) # reward correctin target
         rew_K_hat_inv = torch.cholesky_inverse(self.rew_L)
         self.rew_cache = torch.bmm(rew_K_hat_inv, v).squeeze(-1) # (1, batch_size)
-        
     
     @torch.no_grad()
     def update_dm_cache(self, input, target):
@@ -499,9 +511,6 @@ class MOPOCv0(TDMPC):
 
     @torch.no_grad()
     def corrected_next(self, z, a):
-        """
-        TODO: Leverage the sparsity to speedup computation
-        """
         x = torch.cat([z, a], dim=-1)
 
         # original predictions
@@ -750,6 +759,184 @@ class MOPOCv1(TDMPC):
             r_corr = self.rew_gp.mean_inference(x.t()).t()
 
         return z_pred + z_corr, r_pred + r_corr
+
+    @torch.no_grad()
+    def estimate_value(self, z, actions, horizon):
+        """
+        Use the corrected_next method to estimate the value.
+        """
+        G, discount = 0, 1
+        for t in range(horizon):
+            z, reward = self.corrected_next(z, actions[t])
+            G += discount * reward
+            discount *= self.cfg.discount
+        G += discount * self.Q(z, self.pi(z, self.cfg.min_std)) # terminal value
+        return G
+    
+
+class MOPOCv2(TDMPC):
+    def __init__(self, cfg, num_inducing_points=256):
+        super().__init__(cfg)
+
+        # Deep Dynamics Kernel
+        self.dynamics_likelihood = gpytorch.likelihoods.GaussianLikelihood(batch_shape=torch.Size([cfg.obs_dim])).to(self.device)
+        self.dynamics_gp = utils.DKLOVC(
+            cfg.obs_dim + cfg.action_dim, cfg.mlp_dim, cfg.obs_dim,
+            likelihood=self.dynamics_likelihood,
+            num_inducing_points=num_inducing_points
+        ).to(self.device)
+        self.dynamics_gp_mll = gpytorch.mlls.ExactMarginalLogLikelihood(self.dynamics_gp.likelihood, self.dynamics_gp)
+
+        # Deep Reward Kernel
+        self.rew_likelihood = gpytorch.likelihoods.GaussianLikelihood(batch_shape=torch.Size([1])).to(self.device)
+        self.rew_gp = utils.DKLOVC(
+            cfg.obs_dim + cfg.action_dim, cfg.mlp_dim, 1,
+            likelihood=self.rew_likelihood,
+            num_inducing_points=num_inducing_points
+        ).to(self.device)
+        self.rew_gp_mll = gpytorch.mlls.ExactMarginalLogLikelihood(self.rew_gp.likelihood, self.rew_gp)
+
+        self.gp_optim = torch.optim.Adam(
+            [
+                {'params': self.dynamics_gp.feature_extractor.parameters(), 'weight_decay': 1e-4},
+                {'params': self.dynamics_gp.mean_module.parameters()},
+                {'params': self.dynamics_gp.covar_module.parameters(), 'lr': cfg.lr},
+                {'params': self.dynamics_likelihood.parameters(), 'lr': cfg.lr},
+                {'params': self.rew_gp.feature_extractor.parameters(), 'weight_decay': 1e-4},
+                {'params': self.rew_gp.mean_module.parameters()},
+                {'params': self.rew_gp.covar_module.parameters(), 'lr': cfg.lr},
+                {'params': self.rew_likelihood.parameters(), 'lr': cfg.lr},
+            ],
+            lr=self.cfg.lr
+        )
+
+        # Turn to eval
+        self.dynamics_gp.eval()
+        self.dynamics_likelihood.eval()
+        self.rew_gp.eval()
+        self.rew_likelihood.eval()
+
+        self.cache = False
+
+    def to_eval(self):
+        super().to_eval()
+
+        self.dynamics_gp.eval()
+        self.dynamics_likelihood.eval()
+        self.rew_gp.eval()
+        self.rew_likelihood.eval()
+
+    def to_train(self):
+        super().to_train()
+
+        self.dynamics_gp.train()
+        self.dynamics_likelihood.train()
+        self.rew_gp.train()
+        self.rew_likelihood.train()
+
+    def update_gp_prior(self):
+        # Clear (latent) training inputs
+        self.dynamics_gp.latent_train_inputs = None
+        self.rew_gp.latent_train_inputs = None
+
+        self.to_train()
+
+        # Compute GP loss over memory
+        inputs = torch.cat([self.memory["obs"][:self.current_step+1], self.memory["act"][:self.current_step+1]], dim=-1)
+        dm_targets = self.memory["next_obs"][:self.current_step+1] - self.memory["obs"][:self.current_step+1] - self.dynamics_model(inputs)
+        rew_targets = self.memory["rew"][:self.current_step+1] - self.rew_fn(inputs) 
+
+        # Subsample data to maintain computational efficiency (TODO: Use InfoRS instead of random sampling)
+        subsample_size = min(inputs.size(0), self.cfg.gp_subsample_size)
+        # weights = torch.linspace(1, 5, steps=inputs.size(0)) # preference for new memories
+        # idxs = torch.multinomial(weights, subsample_size, replacement=False)
+        idxs = torch.randperm(inputs.size(0))[:subsample_size]
+        inputs, dm_targets, rew_targets = inputs[idxs], dm_targets[idxs], rew_targets[idxs]
+        
+        # inputs, dm_targets, rew_targets = inputs.t(), dm_targets.t(), rew_targets.t()
+        dm_targets, rew_targets = dm_targets.t(), rew_targets.t()
+
+        self.dynamics_gp.set_train_data(inputs, dm_targets, strict=False)
+        self.rew_gp.set_train_data(inputs, rew_targets, strict=False)
+
+        for _ in range(self.cfg.gp_update_per_iter):
+            self.gp_optim.zero_grad(set_to_none=True)
+
+            dm_gp_loss = -self.dynamics_gp_mll(self.dynamics_gp(inputs), dm_targets).mean()
+            # rew_gp_loss = -self.rew_gp_mll(self.rew_gp(inputs), rew_targets).mean()
+
+            # Optimize GP
+            gp_loss = dm_gp_loss #+ rew_gp_loss
+            gp_loss.backward()
+            self.gp_optim.step()
+
+        self.to_eval()
+
+        return gp_loss.item()
+    
+    @torch.no_grad()
+    def compute_cache(self):
+        print("Computing cache...")
+        self.cache = True 
+
+        # Fetch data from memory
+        obs = self.memory["obs"][:self.current_step+1]
+        act = self.memory["act"][:self.current_step+1]
+        next_obs = self.memory["next_obs"][:self.current_step+1]
+        rew = self.memory["rew"][:self.current_step+1]
+
+        # Compute input and targets
+        inputs = torch.cat([obs, act], dim=-1)
+        dm_targets = next_obs - obs - self.dynamics_model(inputs)
+        rew_targets = rew - self.rew_fn(inputs)
+        dm_targets, rew_targets = dm_targets.t(), rew_targets.t()
+
+        # Set train data and compute cache
+        with linear_operator.settings.cholesky_jitter(1e-2):
+            self.dynamics_gp.clear_cache(inputs, dm_targets)  
+            print("Dynamics GP Rank: ", self.dynamics_gp.m_u.shape)
+
+            # self.rew_gp.clear_cache(inputs, rew_targets)
+            # print("Reward GP Rank: ", self.rew_gp.m_u.shape)
+
+    @torch.no_grad()
+    def correction(self, obs, act, rew, next_obs, step):
+        super().correction(obs, act, rew, next_obs, step)
+
+        # obs = torch.tensor(obs).to(self.device)
+        # act = act.detach().to(self.device)
+        # next_obs = torch.tensor(next_obs).to(self.device)
+        # rew = torch.tensor(rew).to(self.device)
+
+        # input = torch.cat([obs, act], dim=-1)
+        # dm_target = next_obs - obs - self.dynamics_model(input)
+        # rew_target = rew - self.rew_fn(input)
+        # # dm_target, rew_target = dm_target.t(), rew_target.t()
+        # input, dm_target, rew_target = input.unsqueeze(-1).t(), dm_target.unsqueeze(-1), rew_target.unsqueeze(-1)
+
+        # with linear_operator.settings.cholesky_jitter(1e-3):
+        #     try:
+        #         self.dynamics_gp.update_cache(input, dm_target)
+        #         self.rew_gp.update_cache(input, rew_target)  
+        #     except:
+        #         warnings.warn("Cholesky decomposition failed. Skipping cache update.")  
+
+    @torch.no_grad()
+    def corrected_next(self, z, a):
+        x = torch.cat([z, a], dim=-1)
+
+        # original predictions
+        z_pred = z.clone().detach() + self.dynamics_model(x) 
+        r_pred = self.rew_fn(x)
+
+        if not self.cache:
+            return z_pred, r_pred
+
+        # gp orrections
+        z_corr = self.dynamics_gp.mean_inference(x).t()
+        # r_corr = self.rew_gp.mean_inference(x).t()
+
+        return z_pred + z_corr, r_pred #+ r_corr
 
     @torch.no_grad()
     def estimate_value(self, z, actions, horizon):

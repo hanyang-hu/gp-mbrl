@@ -4,13 +4,14 @@ import numpy as np
 import random
 import time
 import os
+import gc
 from omegaconf import OmegaConf
 import gymnasium as gym
 import torch.backends
 import tqdm
 import warnings
 
-from agent import TDMPC, MOPOC, MOPOCv0, MOPOCv1
+from agent import TDMPC, MOPOC, MOPOCv0, MOPOCv1, MOPOCv2
 from utils import Episode, ReplayBuffer
 
 
@@ -69,15 +70,23 @@ def train(cfg_path = "./default.yaml", seed=None):
     cfg.action_lower_bound = (env.action_space.low).tolist()
     cfg.action_upper_bound = (env.action_space.high).tolist()
     # agent = TDMPC(cfg)
-    agent = MOPOCv1(cfg)
+    agent = MOPOCv2(cfg)
     buffer = ReplayBuffer(cfg)
 
     # Run training (adapted from https://github.com/nicklashansen/tdmpc/)
     train_metrics = {}
     episode_idx, start_time = 0, time.time()
     for step in range(0, cfg.train_steps+cfg.episode_length, cfg.episode_length):
-        # Collect trajectory
-        obs, _ = env.reset(seed=cfg.seed+step)
+        # Collect trajectories
+        # if step <= cfg.train_steps / 2:
+        #     env = gym.make(cfg.task, render_mode="rgb_array", g=9.8)
+        #     obs, _ = env.reset(seed=cfg.seed)
+        #     print(f"Gravity: {9.8}")
+        # else:
+        #     env = gym.make(cfg.task, render_mode="rgb_array", g=3.7)
+        #     obs, _ = env.reset(seed=cfg.seed)
+        #     print(f"Gravity: {3.7}")
+        obs, _ = env.reset(seed=cfg.seed)
         episode = Episode(cfg, obs)
 
         st = time.time()
@@ -118,15 +127,21 @@ def train(cfg_path = "./default.yaml", seed=None):
                     progress_bar.set_postfix(post_dict)
                 # Compute cache matrix M_0 based on memory
                 agent.construct_M0() 
-            elif isinstance(agent, MOPOCv0) or isinstance(agent, MOPOCv1):
+            elif isinstance(agent, MOPOCv0) or isinstance(agent, MOPOCv1) or isinstance(agent, MOPOCv2):
                 # Update kernel hyperparameters
                 progress_bar = tqdm.tqdm(range(cfg.gp_update_num), desc=f"Episode {episode_idx} (Prior Update)")
+                # print("GPU Usage Before GP Prior Update (in GB): ", torch.cuda.memory_allocated(device=0)/1e9)
                 for _ in progress_bar:
                     loss = agent.update_gp_prior()
                     post_dict = {"GP Loss": loss}
                     progress_bar.set_postfix(post_dict)
+                # print("GPU Usage After GP Prior Update (in GB): ", torch.cuda.memory_allocated(device=0)/1e9)
                 # Compute cache
                 agent.compute_cache()
+
+                # Clear memory
+                torch.cuda.empty_cache()
+                gc.collect()
 
         # Log training episode
         episode_idx += 1
