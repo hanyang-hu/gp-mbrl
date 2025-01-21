@@ -58,8 +58,9 @@ def Encoder(cfg):
 	if cfg.modality == 'pixels':
 		C = int(3*cfg.frame_stack)
 		layers = [NormalizeImg(),
-				  nn.Conv2d(C, cfg.num_channels, 5, stride=2), nn.ReLU(),
-				  nn.Conv2d(cfg.num_channels, cfg.num_channels, 3, stride=2), nn.ReLU()]
+				  nn.Conv2d(C, cfg.num_channels, 5, stride=2), nn.ELU(),
+                  nn.Conv2d(cfg.num_channels, cfg.num_channels, 5, stride=2), nn.ELU(),
+				  nn.Conv2d(cfg.num_channels, cfg.num_channels, 3, stride=2), nn.ELU()]
 		out_shape = _get_out_shape((C, cfg.img_size, cfg.img_size), layers)
 		layers.extend([Flatten(), nn.Linear(np.prod(out_shape), cfg.latent_dim)])
 	else:
