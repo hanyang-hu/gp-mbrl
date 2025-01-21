@@ -2,7 +2,7 @@
 task: "Pendulum-v1"
 exp_name: td_mpc_2
 save_path: "models/${task}/${exp_name}_${seed}.pt"
-modality: 'state'
+# modality: 'state'
 action_repeat: 1
 discount: 0.99
 episode_length: 200/${action_repeat}
@@ -20,6 +20,13 @@ render_eval: True # Remark. True if need to visualize evaluation and render in h
 save_video: false
 save_model: false
 
+#pixels:
+modality: "pixels"
+frame_stack: 1
+num_channels: 5
+img_size: 64
+latent_dim: 10
+
 # planning
 iterations: 6
 num_samples: 512
@@ -30,7 +37,7 @@ temperature: 0.5
 momentum: 0.1
 
 # learning
-batch_size: 256
+batch_size: 512
 max_buffer_size: 1000000
 horizon: 5
 reward_coef: 0.5
@@ -44,7 +51,7 @@ horizon_schedule: linear(1, ${horizon}, 1000)
 per_alpha: 0.6
 per_beta: 0.4
 grad_clip_norm: 10
-seed_steps: 200
+seed_steps: 100
 update_freq: 1
 tau: 0.01
 rew_beta: 5e-4
@@ -58,7 +65,6 @@ mem_subsample_size: 200
 # architecture
 enc_dim: 256
 mlp_dim: 256
-latent_dim: 50
 
 # wandb (insert your own)
 use_wandb: false

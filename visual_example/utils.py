@@ -29,6 +29,45 @@ def orthogonal_init(m):
             nn.init.zeros_(m.bias)
 
 
+def _get_out_shape(in_shape, layers):
+	"""Utility function. Returns the output shape of a network for a given input shape."""
+	x = torch.randn(*in_shape).unsqueeze(0)
+	return (nn.Sequential(*layers) if isinstance(layers, list) else layers)(x).squeeze(0).shape
+
+
+class NormalizeImg(nn.Module):
+	"""Normalizes pixel observations to [0,1) range."""
+	def __init__(self):
+		super().__init__()
+
+	def forward(self, x):
+		return x.div(255.)
+
+
+class Flatten(nn.Module):
+	"""Flattens its input to a (batched) vector."""
+	def __init__(self):
+		super().__init__()
+		
+	def forward(self, x):
+		return x.view(x.size(0), -1)
+
+
+def Encoder(cfg):
+	"""Returns a TOLD encoder."""
+	if cfg.modality == 'pixels':
+		C = int(3*cfg.frame_stack)
+		layers = [NormalizeImg(),
+				  nn.Conv2d(C, cfg.num_channels, 5, stride=2), nn.ReLU(),
+				  nn.Conv2d(cfg.num_channels, cfg.num_channels, 3, stride=2), nn.ReLU()]
+		out_shape = _get_out_shape((C, cfg.img_size, cfg.img_size), layers)
+		layers.extend([Flatten(), nn.Linear(np.prod(out_shape), cfg.latent_dim)])
+	else:
+		layers = [nn.Linear(cfg.obs_shape[0], cfg.enc_dim), nn.ELU(),
+				  nn.Linear(cfg.enc_dim, cfg.latent_dim)]
+	return nn.Sequential(*layers)
+
+
 class MLP(nn.Module):
     """Simple multi-layer perceptron (MLP) with ELU activation by default."""
     def __init__(self, input_dim, hidden_dim, output_dim, act_fn=nn.ELU()):
@@ -607,7 +646,6 @@ class ReplayBuffer():
         self.cfg = cfg
         cfg.train_steps = int(eval(cfg.train_steps)) if isinstance(cfg.train_steps, str) else cfg.train_steps
         cfg.episode_length = int(eval(cfg.episode_length))
-        cfg.obs_shape = [cfg.obs_dim,]
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.capacity = min(cfg.train_steps, cfg.max_buffer_size)
         dtype = torch.float32 if cfg.modality == 'state' else torch.uint8

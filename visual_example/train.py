@@ -10,8 +10,9 @@ import gymnasium as gym
 import torch.backends
 import tqdm
 import warnings
+import cv2
 
-from agent import TDMPC, MOPOC, MOPOCv0, MOPOCv1, MOPOCv2
+from agent import TDMPC, GPTDMPC
 from utils import Episode, ReplayBuffer
 
 
@@ -22,34 +23,6 @@ def update_metric(metrics, new_metrics):
             metrics[k].append(v)
         else:
             metrics[k] = [v,]
-
-
-def evaluate(env, agent, num_episodes, step, episode_length, action_repeat, render):
-    """Evaluate a trained agent and optionally save a video."""
-    agent.to_eval()
-    episode_rewards = []
-    for _ in range(num_episodes):
-        obs, _ = env.reset()
-        done, ep_reward, t = False, 0, 0
-        while not done and t < episode_length:
-            action = agent.plan(obs, eval_mode=True, step=step, t0=t==0)
-            reward, done = 0.0, False
-            for _ in range(action_repeat):
-                next_obs, r, d, _, _ = env.step(action.detach().cpu().numpy())
-                reward += r # accumulate reward over action repeat
-                done = done or d
-                if done:
-                    break
-            # agent.correction(obs, action, next_obs, reward, done)
-            if render:
-                env.render()
-            obs = next_obs
-            ep_reward += reward
-            t += 1
-        episode_rewards.append(ep_reward)
-    env.close()
-    agent.to_train()
-    return np.nanmean(episode_rewards)
 
 
 def train(cfg_path = "./default.yaml", seed=None):
@@ -65,12 +38,18 @@ def train(cfg_path = "./default.yaml", seed=None):
         torch.use_deterministic_algorithms(True) # set CUBLAS_WORKSPACE_CONFIG=:4096:8 (for Windows)
 
     env = gym.make(cfg.task, render_mode="rgb_array")
-    cfg.obs_dim = env.observation_space.shape[0]
+    obs, _ = env.reset(seed=cfg.seed)
+
+    vis_obs = env.render()
+    vis_obs = cv2.resize(vis_obs, (cfg.img_size, cfg.img_size), interpolation=cv2.INTER_LINEAR).transpose(2, 0, 1)
+    # vis_obs = torch.tensor(vis_obs, dtype=torch.float32)
+    cfg.obs_shape = list(vis_obs.shape)
+    
     cfg.action_dim = env.action_space.shape[0]
     cfg.action_lower_bound = (env.action_space.low).tolist()
     cfg.action_upper_bound = (env.action_space.high).tolist()
     agent = TDMPC(cfg)
-    # agent = MOPOCv2(cfg)
+    # agent = GPTDMPC(cfg)
     buffer = ReplayBuffer(cfg)
 
     # Run training (adapted from https://github.com/nicklashansen/tdmpc/)
@@ -78,32 +57,31 @@ def train(cfg_path = "./default.yaml", seed=None):
     episode_idx, start_time = 0, time.time()
     for step in range(0, cfg.train_steps+cfg.episode_length, cfg.episode_length):
         # Collect trajectories
-        # if step <= cfg.train_steps / 2:
-        #     env = gym.make(cfg.task, render_mode="rgb_array", g=9.8)
-        #     obs, _ = env.reset(seed=cfg.seed)
-        #     print(f"Gravity: {9.8}")
-        # else:
-        #     env = gym.make(cfg.task, render_mode="rgb_array", g=3.7)
-        #     obs, _ = env.reset(seed=cfg.seed)
-        #     print(f"Gravity: {3.7}")
         obs, _ = env.reset(seed=cfg.seed+step)
-        episode = Episode(cfg, obs)
+        vis_obs = env.render()
+        vis_obs = cv2.resize(vis_obs, (cfg.img_size, cfg.img_size), interpolation=cv2.INTER_LINEAR).transpose(2, 0, 1)
+        # vis_obs = torch.tensor(vis_obs, dtype=torch.float32)
+        episode = Episode(cfg, vis_obs)
 
         st = time.time()
         agent.to_eval() # fix statistics such as layernorm
         with torch.no_grad(), gpytorch.settings.fast_pred_var(), gpytorch.settings.max_root_decomposition_size(128):
             while not episode.done:
-                action = agent.plan(obs, step=step, t0=episode.first)
+                action = agent.plan(vis_obs, step=step, t0=episode.first)
                 reward, done = 0.0, False
                 for _ in range(cfg.action_repeat):
                     next_obs, r, d, _, _ = env.step(action.detach().cpu().numpy())
+                    next_vis_obs = env.render()
+                    next_vis_obs = cv2.resize(next_vis_obs, (cfg.img_size, cfg.img_size), interpolation=cv2.INTER_LINEAR).transpose(2, 0, 1)
+                    # next_vis_obs = torch.tensor(next_vis_obs, dtype=torch.float32)
                     reward += r # accumulate reward over action repeat
                     done = done or d
                     if done:
                         break
-                agent.correction(obs, action, reward, next_obs, step+len(episode))
+                agent.correction(vis_obs, action, reward, next_vis_obs, step+len(episode))
                 obs = next_obs
-                episode += (obs, action, reward, done)
+                vis_obs = next_vis_obs
+                episode += (vis_obs, action, reward, done)
             assert len(episode) == cfg.episode_length
             agent.to_train()
             buffer += episode
@@ -118,29 +96,8 @@ def train(cfg_path = "./default.yaml", seed=None):
                 loss = agent.update(buffer, step)
                 post_dict = {"Weighted Loss": loss["weighted_loss"]}
                 progress_bar.set_postfix(post_dict)
-            if isinstance(agent, MOPOC):
-                # Update kernel hyperparameters
-                progress_bar = tqdm.tqdm(range(cfg.gp_update_num), desc=f"Episode {episode_idx} (Prior Update)")
-                for _ in progress_bar:
-                    loss = agent.update_gp_prior()
-                    post_dict = {"GP Loss": loss}
-                    progress_bar.set_postfix(post_dict)
-                # Compute cache matrix M_0 based on memory
-                agent.construct_M0() 
-            elif isinstance(agent, MOPOCv0) or isinstance(agent, MOPOCv1):
-                # Update kernel hyperparameters
-                progress_bar = tqdm.tqdm(range(cfg.gp_update_num), desc=f"Episode {episode_idx} (Prior Update)")
-                for _ in progress_bar:
-                    loss = agent.update_gp_prior()
-                    post_dict = {"GP Loss": loss}
-                    progress_bar.set_postfix(post_dict)
-                # Compute cache
-                agent.compute_cache()
-
-                # Clear memory
-                torch.cuda.empty_cache()
-                gc.collect()
-            elif isinstance(agent, MOPOCv2):
+            
+            if isinstance(agent, GPTDMPC):
                 # Update kernel hyperparameters
                 progress_bar = tqdm.tqdm(range(cfg.gp_update_num), desc=f"Episode {episode_idx} (Prior Update)")
                 for _ in progress_bar:
@@ -171,14 +128,6 @@ def train(cfg_path = "./default.yaml", seed=None):
         except:
             print(f"Episode {episode_idx}:\n    Env Step: {env_step+len(episode)},\n    Total Time: {time.time() - start_time:.2f}s,\n    Episode Reward: {common_metrics['episode_reward']:.2f}")
             print(f"    Reward Center: {agent.rew_ctr:.2f}")
-
-        # Evaluate and visualize agent periodically
-        if cfg.eval and env_step != 0 and env_step % cfg.eval_freq == 0:
-            with torch.no_grad():
-                render = cfg.render_eval
-                eval_env = gym.make(cfg.task, render_mode="human") if render else gym.make(cfg.task, render_mode="rgb_array") 
-                evaluate(eval_env, agent, cfg.eval_episodes, step, int(eval(cfg.val_episode_length)), action_repeat=cfg.action_repeat, render=render)
-            # print(f"Evaluation:\n    Episode: {episode_idx}, \n    Step: {step},\n    Env Step: {env_step},\n    Total Time: {time.time() - start_time:.2f}s,\n    Episode Reward: {common_metrics['episode_reward']:.2f}\n    Horizon: {agent._prev_mean.shape}")
 
     print('Training completed successfully')
 

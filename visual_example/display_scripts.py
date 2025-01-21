@@ -58,9 +58,9 @@ set CUBLAS_WORKSPACE_CONFIG=:16:8
 
 python train.py --seed 41
 python train.py --seed 42
+python train.py --seed 43
 python train.py --seed 44
 python train.py --seed 45
 
-python train.py --seed 43
 
 """

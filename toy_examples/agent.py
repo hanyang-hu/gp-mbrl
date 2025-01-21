@@ -800,11 +800,11 @@ class MOPOCv2(TDMPC):
             [
                 {'params': self.dynamics_gp.feature_extractor.parameters(), 'weight_decay': 1e-4},
                 {'params': self.dynamics_gp.mean_module.parameters()},
-                {'params': self.dynamics_gp.covar_module.parameters(), 'lr': cfg.lr},
+                {'params': self.dynamics_gp.covar_module.parameters(), 'lr': cfg.lr * 0.5},
                 {'params': self.dynamics_likelihood.parameters(), 'lr': cfg.lr},
                 {'params': self.rew_gp.feature_extractor.parameters(), 'weight_decay': 1e-4},
                 {'params': self.rew_gp.mean_module.parameters()},
-                {'params': self.rew_gp.covar_module.parameters(), 'lr': cfg.lr},
+                {'params': self.rew_gp.covar_module.parameters(), 'lr': cfg.lr * 0.5},
                 {'params': self.rew_likelihood.parameters(), 'lr': cfg.lr},
             ],
             lr=self.cfg.lr
@@ -834,6 +834,107 @@ class MOPOCv2(TDMPC):
         self.rew_gp.train()
         self.rew_likelihood.train()
 
+    def update(self, replay_buffer, step):
+        with torch.autograd.set_detect_anomaly(False):
+            obs, next_obses, action, reward, idxs, weights = replay_buffer.sample()
+
+            # Reset action to a leaf node
+            action = action.detach()
+
+            # Centering reward signals
+            if self.cfg.reward_centering:
+                centered_reward = reward - self.rew_ctr
+            else:
+                centered_reward = reward
+
+            self.optim.zero_grad(set_to_none=True)
+            self.std = utils.linear_schedule(self.cfg.std_schedule, step)
+            # self.gp_optim.zero_grad(set_to_none=True)
+            
+            # Turn to train
+            self.to_train()
+
+            # Do not encode representation
+            z = [None] * (self.cfg.horizon + 1)
+            z[0] = obs.clone()
+            # gp_z = [None] * (self.cfg.horizon + 1)
+            # gp_z[0] = obs.clone()
+
+            batch_size = obs.size(0)
+            consistency_loss, reward_loss, value_loss, priority_loss = (torch.zeros(batch_size, device=obs.device),) * 4
+            # gp_loss = 0.0
+            
+            for t in range(self.cfg.horizon):
+                # Predictions
+                Q1, Q2 = self.q1_net(z[t], action[t]), self.q2_net(z[t], action[t])
+                z[t+1], reward_pred = self.next(z[t], action[t]) # z[t+1] is the prediction
+
+                next_obs = next_obses[t]
+                next_z = next_obs # no encoding (supposedly from target encoder)
+                td_target = self._td_target(next_obs, centered_reward[t]).detach()
+
+                # gp_inputs = torch.cat([gp_z[t], action[t]], dim=-1)
+                # dm_targets = next_obs - self.dynamics_model(torch.cat([gp_z[t], action[t]], dim=-1)).detach()
+                # dm_targets = dm_targets.t()
+                # self.dynamics_gp.set_train_data(gp_inputs, dm_targets, strict=False)
+                # gp_output = self.dynamics_gp(gp_inputs)
+                # gp_z[t+1] = gp_output.mean.t() + self.dynamics_model(torch.cat([gp_z[t], action[t]], dim=-1)).detach() # gp_z[t+1] is the GP corrected mean prediction
+                # mll = -self.dynamics_gp_mll(gp_output, dm_targets).mean()
+
+                # Losses
+                rho = (self.cfg.rho ** t)
+                consistency_loss += rho * torch.mean(utils.mse(z[t+1], next_z), dim=1)
+                reward_loss += rho * utils.mse(reward_pred, centered_reward[t]).squeeze(1)
+                value_loss += rho * (utils.mse(Q1, td_target) + utils.mse(Q2, td_target)).squeeze(1)
+                priority_loss += rho * (utils.l1(Q1, td_target) + utils.l1(Q2, td_target)).squeeze(1)
+                # gp_loss += rho * -mll
+
+            # Optimize model
+            total_loss = self.cfg.consistency_coef * consistency_loss.clamp(max=1e4) + \
+                        self.cfg.reward_coef * reward_loss.clamp(max=1e4) + \
+                        self.cfg.value_coef * value_loss.clamp(max=1e4)
+
+            weighted_loss = (total_loss * weights).mean()
+            weighted_loss.register_hook(lambda grad: grad * (1/self.cfg.horizon)) 
+            weighted_loss.backward()
+
+            # inputs = torch.cat([obs, action[0]], dim=-1)
+            # dm_targets = next_obses[0] - obs - self.dynamics_model(inputs).detach()
+            # dm_targets = dm_targets.t()
+            # self.dynamics_gp.set_train_data(inputs, dm_targets, strict=False)
+            # gp_output = self.dynamics_gp(inputs)
+            # gp_loss = -self.dynamics_gp_mll(gp_output, dm_targets).mean()
+
+            # gp_loss.backward()
+
+            # Clip gradients
+            torch.nn.utils.clip_grad_norm_(self.dynamics_model.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
+            torch.nn.utils.clip_grad_norm_(self.q1_net.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
+            torch.nn.utils.clip_grad_norm_(self.q2_net.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
+            torch.nn.utils.clip_grad_norm_(self.rew_fn.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
+
+            self.optim.step()
+            # self.gp_optim.step()
+            
+            replay_buffer.update_priorities(idxs, priority_loss.clamp(max=1e4).detach())
+
+            # Update policy + target network
+            pi_loss = self.update_pi([z_t.detach() for z_t in z])
+            if step % self.cfg.update_freq == 0:
+                self.ema(self.cfg.tau)
+
+            # Turn to eval
+            self.to_eval()
+
+            return {
+                'consistency_loss': float(consistency_loss.mean().item()),
+                'reward_loss': float(reward_loss.mean().item()),
+                'value_loss': float(value_loss.mean().item()),
+                'pi_loss': pi_loss,
+                'total_loss': float(total_loss.mean().item()),
+                'weighted_loss': float(weighted_loss.mean().item())
+            }
+
     def update_gp_prior(self):
         # Clear (latent) training inputs
         self.dynamics_gp.latent_train_inputs = None
@@ -857,7 +958,7 @@ class MOPOCv2(TDMPC):
         dm_targets, rew_targets = dm_targets.t(), rew_targets.t()
 
         self.dynamics_gp.set_train_data(inputs, dm_targets, strict=False)
-        self.rew_gp.set_train_data(inputs, rew_targets, strict=False)
+        # self.rew_gp.set_train_data(inputs, rew_targets, strict=False)
 
         for _ in range(self.cfg.gp_update_per_iter):
             self.gp_optim.zero_grad(set_to_none=True)
@@ -875,15 +976,21 @@ class MOPOCv2(TDMPC):
         return gp_loss.item()
     
     @torch.no_grad()
-    def compute_cache(self):
+    def compute_cache(self, replay_buffer):
         print("Computing cache...")
         self.cache = True 
 
         # Fetch data from memory
-        obs = self.memory["obs"][:self.current_step+1]
-        act = self.memory["act"][:self.current_step+1]
-        next_obs = self.memory["next_obs"][:self.current_step+1]
-        rew = self.memory["rew"][:self.current_step+1]
+        window_size = self.current_step+1 # all data in the memory
+        obs = self.memory["obs"][max(0, self.current_step+1-window_size):self.current_step+1]
+        act = self.memory["act"][max(0, self.current_step+1-window_size):self.current_step+1]
+        next_obs = self.memory["next_obs"][max(0, self.current_step+1-window_size):self.current_step+1]
+        rew = self.memory["rew"][max(0, self.current_step+1-window_size):self.current_step+1]
+        # temp_batch_size = replay_buffer.cfg.batch_size
+        # replay_buffer.cfg.batch_size = window_size
+        # obs, next_obses, action, reward, _, _ = replay_buffer.sample() # sample from the replay buffer
+        # act, next_obs, rew = action[0], next_obses[0], reward[0]
+        # replay_buffer.cfg.batch_size = temp_batch_size
 
         # Compute input and targets
         inputs = torch.cat([obs, act], dim=-1)
