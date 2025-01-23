@@ -3,49 +3,51 @@ from copy import deepcopy
 import torch
 import gpytorch
 import numpy as np
+import warnings
+import math
 import linear_operator
-import gc
+import copy
 
 
 class Agent():
     """
-    Base class for online planning agents.
+    Base class for online planning agents (encoder-free for toy examples).
     The planning and loss comptation methods are adapted from https://github.com/nicklashansen/tdmpc/
     """
     def __init__(self, cfg):
         self.cfg = cfg
-        obs_dim = cfg.latent_dim
+        obs_dim = cfg.obs_dim
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.std = utils.linear_schedule(cfg.std_schedule, 0)
 
         # Encoder
-        self.encoder = utils.Encoder(cfg).to(self.device)
+        self.encoder = utils.MLP(obs_dim, cfg.mlp_dim, cfg.latent_dim).to(self.device)
         self.encoder_target = deepcopy(self.encoder)
 
         # Dynamics model (Default: MLP)
         self.dynamics_model = utils.MLP(
-            obs_dim + cfg.action_dim, cfg.mlp_dim, obs_dim
+            cfg.latent_dim + cfg.action_dim, cfg.mlp_dim, cfg.latent_dim
         ).to(self.device)
 
         # (Double) Q function
-        self.q1_net = utils.QNet(obs_dim, cfg.action_dim, cfg.mlp_dim).to(self.device)
-        self.q2_net = utils.QNet(obs_dim, cfg.action_dim, cfg.mlp_dim).to(self.device)
+        self.q1_net = utils.QNet(cfg.latent_dim, cfg.action_dim, cfg.mlp_dim).to(self.device)
+        self.q2_net = utils.QNet(cfg.latent_dim, cfg.action_dim, cfg.mlp_dim).to(self.device)
         self.q1_target = deepcopy(self.q1_net)
         self.q2_target = deepcopy(self.q2_net)
 
         # Policy network
-        self.pi_net = utils.PolicyNet(obs_dim, cfg.mlp_dim, cfg.action_dim, cfg.action_lower_bound, cfg.action_upper_bound).to(self.device)
+        self.pi_net = utils.PolicyNet(cfg.latent_dim, cfg.mlp_dim, cfg.action_dim, cfg.action_lower_bound, cfg.action_upper_bound).to(self.device)
         self.pi_optim = torch.optim.Adam(self.pi_net.parameters(), lr=cfg.lr)
 
         # Reward network
-        self.rew_fn = utils.MLP(obs_dim + cfg.action_dim, cfg.mlp_dim, 1).to(self.device)
+        self.rew_fn = utils.MLP(cfg.latent_dim + cfg.action_dim, cfg.mlp_dim, 1).to(self.device)
         self.rew_ctr = 0.0
 
         train_steps = int(eval(cfg.train_steps)) + int(eval(cfg.episode_length))
         self.memory = {
-            "obs": torch.zeros((train_steps, 3, cfg.img_size, cfg.img_size)).to(self.device),
+            "obs": torch.zeros((train_steps, cfg.obs_dim)).to(self.device),
             "act": torch.zeros((train_steps, cfg.action_dim)).to(self.device),
-            "next_obs": torch.zeros((train_steps, 3, cfg.img_size, cfg.img_size)).to(self.device),
+            "next_obs": torch.zeros((train_steps, cfg.obs_dim)).to(self.device),
             "rew": torch.zeros((train_steps, 1)).to(self.device)
         }
         self.current_step = 0
@@ -187,7 +189,10 @@ class Agent():
 
     def next(self, z, a):
         x = torch.cat([z, a], dim=-1)
-        return z.clone().detach() + self.dynamics_model(x), self.rew_fn(x)
+        if self.cfg.res_dyna:
+            return z.clone().detach() + self.dynamics_model(x), self.rew_fn(x)
+        else:
+            return self.dynamics_model(x), self.rew_fn(x)
     
     def track_q_grad(self, enable=True):
         for m in [self.q1_net, self.q2_net]:
@@ -233,9 +238,9 @@ class Agent():
         self.rew_fn.eval()
 
     def ema(self, tau):
+        utils.ema(self.encoder, self.encoder_target, tau)
         utils.ema(self.q1_net, self.q1_target, tau)
         utils.ema(self.q2_net, self.q2_target, tau)
-        utils.ema(self.encoder, self.encoder_target, tau)
 
     @torch.no_grad()
     def _td_target(self, next_obs, reward):
@@ -275,7 +280,7 @@ class TDMPC(Agent):
             # Turn to train
             self.to_train()
 
-            # Representation
+            # Do not encode representation
             z = [None] * (self.cfg.horizon + 1)
             z[0] = self.encoder(obs)
 
@@ -288,7 +293,7 @@ class TDMPC(Agent):
                 z[t+1], reward_pred = self.next(z[t], action[t]) # z[t+1] is the prediction
 
                 next_obs = next_obses[t]
-                next_z = self.encoder_target(next_obs).detach()
+                next_z = self.encoder_target(next_obs).detach() # no encoding (supposedly from target encoder)
                 td_target = self._td_target(next_obs, centered_reward[t]).detach()
 
                 # Losses
@@ -326,9 +331,6 @@ class TDMPC(Agent):
             # Turn to eval
             self.to_eval()
 
-            # torch.cuda.empty_cache()
-            # gc.collect()
-
             return {
                 'consistency_loss': float(consistency_loss.mean().item()),
                 'reward_loss': float(reward_loss.mean().item()),
@@ -340,22 +342,23 @@ class TDMPC(Agent):
         
 
 class GPTDMPC(TDMPC):
-    def __init__(self, cfg, num_inducing_points=256):
+    def __init__(self, cfg, num_inducing_points=512, latent_gp_dim=3):
         super().__init__(cfg)
 
         # Deep Dynamics Kernel
-        self.dynamics_likelihood = gpytorch.likelihoods.GaussianLikelihood(batch_shape=torch.Size([cfg.obs_dim])).to(self.device)
+        self.dynamics_likelihood = gpytorch.likelihoods.GaussianLikelihood(batch_shape=torch.Size([cfg.latent_dim])).to(self.device)
         self.dynamics_gp = utils.DKLOVC(
-            cfg.obs_dim + cfg.action_dim, cfg.mlp_dim, cfg.obs_dim,
+            cfg.latent_dim + cfg.action_dim, cfg.mlp_dim, cfg.latent_dim,
             likelihood=self.dynamics_likelihood,
-            num_inducing_points=num_inducing_points
+            num_inducing_points=num_inducing_points,
+            latent_gp_dim=latent_gp_dim
         ).to(self.device)
         self.dynamics_gp_mll = gpytorch.mlls.ExactMarginalLogLikelihood(self.dynamics_gp.likelihood, self.dynamics_gp)
 
         # Deep Reward Kernel
         self.rew_likelihood = gpytorch.likelihoods.GaussianLikelihood(batch_shape=torch.Size([1])).to(self.device)
         self.rew_gp = utils.DKLOVC(
-            cfg.obs_dim + cfg.action_dim, cfg.mlp_dim, 1,
+            cfg.latent_dim + cfg.action_dim, cfg.mlp_dim, 1,
             likelihood=self.rew_likelihood,
             num_inducing_points=num_inducing_points
         ).to(self.device)
@@ -365,11 +368,11 @@ class GPTDMPC(TDMPC):
             [
                 {'params': self.dynamics_gp.feature_extractor.parameters(), 'weight_decay': 1e-4},
                 {'params': self.dynamics_gp.mean_module.parameters()},
-                {'params': self.dynamics_gp.covar_module.parameters(), 'lr': cfg.lr * 0.5},
+                {'params': self.dynamics_gp.covar_module.parameters(), 'lr': cfg.lr},
                 {'params': self.dynamics_likelihood.parameters(), 'lr': cfg.lr},
                 {'params': self.rew_gp.feature_extractor.parameters(), 'weight_decay': 1e-4},
                 {'params': self.rew_gp.mean_module.parameters()},
-                {'params': self.rew_gp.covar_module.parameters(), 'lr': cfg.lr * 0.5},
+                {'params': self.rew_gp.covar_module.parameters(), 'lr': cfg.lr},
                 {'params': self.rew_likelihood.parameters(), 'lr': cfg.lr},
             ],
             lr=self.cfg.lr
@@ -413,21 +416,18 @@ class GPTDMPC(TDMPC):
                 centered_reward = reward
 
             self.optim.zero_grad(set_to_none=True)
+            self.gp_optim.zero_grad(set_to_none=True)
             self.std = utils.linear_schedule(self.cfg.std_schedule, step)
-            # self.gp_optim.zero_grad(set_to_none=True)
             
             # Turn to train
             self.to_train()
 
             # Do not encode representation
             z = [None] * (self.cfg.horizon + 1)
-            z[0] = obs.clone()
-            # gp_z = [None] * (self.cfg.horizon + 1)
-            # gp_z[0] = obs.clone()
+            z[0] = self.encoder(obs)
 
             batch_size = obs.size(0)
             consistency_loss, reward_loss, value_loss, priority_loss = (torch.zeros(batch_size, device=obs.device),) * 4
-            # gp_loss = 0.0
             
             for t in range(self.cfg.horizon):
                 # Predictions
@@ -435,16 +435,8 @@ class GPTDMPC(TDMPC):
                 z[t+1], reward_pred = self.next(z[t], action[t]) # z[t+1] is the prediction
 
                 next_obs = next_obses[t]
-                next_z = next_obs # no encoding (supposedly from target encoder)
+                next_z = self.encoder_target(next_obs).detach() 
                 td_target = self._td_target(next_obs, centered_reward[t]).detach()
-
-                # gp_inputs = torch.cat([gp_z[t], action[t]], dim=-1)
-                # dm_targets = next_obs - self.dynamics_model(torch.cat([gp_z[t], action[t]], dim=-1)).detach()
-                # dm_targets = dm_targets.t()
-                # self.dynamics_gp.set_train_data(gp_inputs, dm_targets, strict=False)
-                # gp_output = self.dynamics_gp(gp_inputs)
-                # gp_z[t+1] = gp_output.mean.t() + self.dynamics_model(torch.cat([gp_z[t], action[t]], dim=-1)).detach() # gp_z[t+1] is the GP corrected mean prediction
-                # mll = -self.dynamics_gp_mll(gp_output, dm_targets).mean()
 
                 # Losses
                 rho = (self.cfg.rho ** t)
@@ -452,34 +444,68 @@ class GPTDMPC(TDMPC):
                 reward_loss += rho * utils.mse(reward_pred, centered_reward[t]).squeeze(1)
                 value_loss += rho * (utils.mse(Q1, td_target) + utils.mse(Q2, td_target)).squeeze(1)
                 priority_loss += rho * (utils.l1(Q1, td_target) + utils.l1(Q2, td_target)).squeeze(1)
-                # gp_loss += rho * -mll
 
-            # Optimize model
+            # Compute TD-MPC loss
             total_loss = self.cfg.consistency_coef * consistency_loss.clamp(max=1e4) + \
                         self.cfg.reward_coef * reward_loss.clamp(max=1e4) + \
                         self.cfg.value_coef * value_loss.clamp(max=1e4)
 
             weighted_loss = (total_loss * weights).mean()
             weighted_loss.register_hook(lambda grad: grad * (1/self.cfg.horizon)) 
+
+            # Compute GP loss
+            gp_obs = self.memory["obs"][:self.current_step+1]
+            gp_act = self.memory["act"][:self.current_step+1]
+            gp_next_obs = self.memory["next_obs"][:self.current_step+1]
+            memory_size = gp_obs.size(0)
+
+            # Subsample data uniformly instead of from PER
+            subsample_size = min(memory_size, self.cfg.gp_simul_subsample_size)
+            gp_idxs = torch.randperm(memory_size)[:subsample_size]
+            gp_obs, gp_act, gp_next_obs = gp_obs[gp_idxs], gp_act[gp_idxs], gp_next_obs[gp_idxs]
+
+            # Compute inputs and targets
+            if self.cfg.frozen_encoder: # Gradient does not backpropagate to the encoder
+                gp_z = self.encoder(gp_obs).detach()
+                gp_next_z = self.encoder(gp_next_obs).detach()
+            else:
+                gp_z = self.encoder(gp_obs)
+                gp_next_z = self.encoder_target(gp_next_obs).detach()
+            gp_inputs = torch.cat([gp_z, gp_act], dim=-1)
+
+            if self.cfg.gp_learn_error: 
+                gp_z_pred, _ = self.next(gp_z, gp_act) # prediction from the original dynamics model
+                dm_targets = (gp_next_z - gp_z_pred).detach()
+            else:
+                dm_targets = gp_next_z.detach() # GP hyperparameters only considers the ground-truth, does not consider the original prediction error
+            dm_targets = dm_targets.t()
+
+            # Compute GP loss
+            self.dynamics_gp.set_train_data(gp_inputs, dm_targets, strict=False)
+            gp_output = self.dynamics_gp(gp_inputs)
+            gp_loss = -self.dynamics_gp_mll(gp_output, dm_targets).mean()
+
+            # Compute signal-to-noise penalty (see https://github.com/EmbodiedVision/dlgpd/blob/master/dlgpd/models/gp.py)
+            tau, p = 10, 8
+            output_scale = self.dynamics_gp.covar_module.outputscale
+            noise_variance = self.dynamics_gp.likelihood.noise_covar.noise
+            snr = output_scale / noise_variance
+            snr_penalty = (torch.log(snr) / math.log(tau)).pow(p).sum()
+            gp_loss += self.cfg.snr_coef * snr_penalty
+            gp_loss *= self.cfg.gp_loss_coef
+
             weighted_loss.backward()
-
-            # inputs = torch.cat([obs, action[0]], dim=-1)
-            # dm_targets = next_obses[0] - obs - self.dynamics_model(inputs).detach()
-            # dm_targets = dm_targets.t()
-            # self.dynamics_gp.set_train_data(inputs, dm_targets, strict=False)
-            # gp_output = self.dynamics_gp(inputs)
-            # gp_loss = -self.dynamics_gp_mll(gp_output, dm_targets).mean()
-
-            # gp_loss.backward()
+            gp_loss.backward()
 
             # Clip gradients
+            torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
             torch.nn.utils.clip_grad_norm_(self.dynamics_model.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
             torch.nn.utils.clip_grad_norm_(self.q1_net.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
             torch.nn.utils.clip_grad_norm_(self.q2_net.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
             torch.nn.utils.clip_grad_norm_(self.rew_fn.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
 
             self.optim.step()
-            # self.gp_optim.step()
+            self.gp_optim.step()
             
             replay_buffer.update_priorities(idxs, priority_loss.clamp(max=1e4).detach())
 
@@ -497,49 +523,56 @@ class GPTDMPC(TDMPC):
                 'value_loss': float(value_loss.mean().item()),
                 'pi_loss': pi_loss,
                 'total_loss': float(total_loss.mean().item()),
-                'weighted_loss': float(weighted_loss.mean().item())
+                'weighted_loss': float(weighted_loss.mean().item()),
+                'gp_loss': gp_loss.item()
             }
 
     def update_gp_prior(self):
-        # Clear (latent) training inputs
-        self.dynamics_gp.latent_train_inputs = None
-        self.rew_gp.latent_train_inputs = None
+        self.gp_optim.zero_grad(set_to_none=True)
 
-        self.to_train()
+        # Compute GP loss
+        gp_obs = self.memory["obs"][:self.current_step+1]
+        gp_act = self.memory["act"][:self.current_step+1]
+        gp_next_obs = self.memory["next_obs"][:self.current_step+1]
+        memory_size = gp_obs.size(0)
 
-        # Compute GP loss over memory
-        inputs = torch.cat([self.memory["obs"][:self.current_step+1], self.memory["act"][:self.current_step+1]], dim=-1)
-        dm_targets = self.memory["next_obs"][:self.current_step+1] - self.memory["obs"][:self.current_step+1] - self.dynamics_model(inputs)
-        rew_targets = self.memory["rew"][:self.current_step+1] - self.rew_fn(inputs) 
+        # Subsample data uniformly instead of from PER
+        subsample_size = min(memory_size, self.cfg.gp_prior_subsample_size)
+        gp_idxs = torch.randperm(memory_size)[:subsample_size]
+        gp_obs, gp_act, gp_next_obs = gp_obs[gp_idxs], gp_act[gp_idxs], gp_next_obs[gp_idxs]
 
-        # Subsample data to maintain computational efficiency (TODO: Use InfoRS instead of random sampling)
-        subsample_size = min(inputs.size(0), self.cfg.gp_subsample_size)
-        # weights = torch.linspace(1, 5, steps=inputs.size(0)) # preference for new memories
-        # idxs = torch.multinomial(weights, subsample_size, replacement=False)
-        idxs = torch.randperm(inputs.size(0))[:subsample_size]
-        inputs, dm_targets, rew_targets = inputs[idxs], dm_targets[idxs], rew_targets[idxs]
-        
-        # inputs, dm_targets, rew_targets = inputs.t(), dm_targets.t(), rew_targets.t()
-        dm_targets, rew_targets = dm_targets.t(), rew_targets.t()
+        # Compute inputs and targets (with frozen encoder for fine-tuning)
+        gp_z = self.encoder(gp_obs).detach()
+        gp_next_z = self.encoder(gp_next_obs).detach()
+        gp_inputs = torch.cat([gp_z, gp_act], dim=-1)
 
-        self.dynamics_gp.set_train_data(inputs, dm_targets, strict=False)
-        # self.rew_gp.set_train_data(inputs, rew_targets, strict=False)
+        if self.cfg.gp_learn_error: 
+            gp_z_pred, _ = self.next(gp_z, gp_act) # prediction from the original dynamics model
+            dm_targets = (gp_next_z - gp_z_pred).detach()
+        else:
+            dm_targets = gp_next_z.detach() # GP hyperparameters only considers the ground-truth, does not consider the original prediction error
+        dm_targets = dm_targets.t()
 
-        for _ in range(self.cfg.gp_update_per_iter):
-            self.gp_optim.zero_grad(set_to_none=True)
+        # Compute GP loss
+        self.dynamics_gp.set_train_data(gp_inputs, dm_targets, strict=False)
+        gp_output = self.dynamics_gp(gp_inputs)
+        gp_loss = -self.dynamics_gp_mll(gp_output, dm_targets).mean()
 
-            dm_gp_loss = -self.dynamics_gp_mll(self.dynamics_gp(inputs), dm_targets).mean()
-            # rew_gp_loss = -self.rew_gp_mll(self.rew_gp(inputs), rew_targets).mean()
+        # Compute signal-to-noise penalty (see https://github.com/EmbodiedVision/dlgpd/blob/master/dlgpd/models/gp.py)
+        tau, p = 10, 8
+        output_scale = self.dynamics_gp.covar_module.outputscale
+        noise_variance = self.dynamics_gp.likelihood.noise_covar.noise
+        snr = output_scale / noise_variance
+        snr_penalty = (torch.log(snr) / math.log(tau)).pow(p).sum()
+        gp_loss += self.cfg.snr_coef * snr_penalty
+        gp_loss *= self.cfg.gp_loss_coef
 
-            # Optimize GP
-            gp_loss = dm_gp_loss #+ rew_gp_loss
-            gp_loss.backward()
-            self.gp_optim.step()
-
-        self.to_eval()
+        gp_loss.backward()
+        self.gp_optim.step()
 
         return gp_loss.item()
-    
+
+
     @torch.no_grad()
     def compute_cache(self, replay_buffer):
         print("Computing cache...")
@@ -550,62 +583,34 @@ class GPTDMPC(TDMPC):
         obs = self.memory["obs"][max(0, self.current_step+1-window_size):self.current_step+1]
         act = self.memory["act"][max(0, self.current_step+1-window_size):self.current_step+1]
         next_obs = self.memory["next_obs"][max(0, self.current_step+1-window_size):self.current_step+1]
-        rew = self.memory["rew"][max(0, self.current_step+1-window_size):self.current_step+1]
-        # temp_batch_size = replay_buffer.cfg.batch_size
-        # replay_buffer.cfg.batch_size = window_size
-        # obs, next_obses, action, reward, _, _ = replay_buffer.sample() # sample from the replay buffer
-        # act, next_obs, rew = action[0], next_obses[0], reward[0]
-        # replay_buffer.cfg.batch_size = temp_batch_size
 
         # Compute input and targets
-        inputs = torch.cat([obs, act], dim=-1)
-        dm_targets = next_obs - obs - self.dynamics_model(inputs)
-        rew_targets = rew - self.rew_fn(inputs)
-        dm_targets, rew_targets = dm_targets.t(), rew_targets.t()
+        z = self.encoder(obs)
+        next_z = self.encoder(next_obs)
+        z_pred, _ = self.next(z, act)
+        inputs = torch.cat([z, act], dim=-1)
+        dm_targets = next_z - z_pred # GP updates the prediction error of the original dynamics model
+        dm_targets = dm_targets.t()
 
         # Set train data and compute cache
         with linear_operator.settings.cholesky_jitter(1e-2):
             self.dynamics_gp.clear_cache(inputs, dm_targets)  
             print("Dynamics GP Rank: ", self.dynamics_gp.m_u.shape)
 
-            # self.rew_gp.clear_cache(inputs, rew_targets)
-            # print("Reward GP Rank: ", self.rew_gp.m_u.shape)
-
     @torch.no_grad()
     def correction(self, obs, act, rew, next_obs, step):
         super().correction(obs, act, rew, next_obs, step)
 
-        # obs = torch.tensor(obs).to(self.device)
-        # act = act.detach().to(self.device)
-        # next_obs = torch.tensor(next_obs).to(self.device)
-        # rew = torch.tensor(rew).to(self.device)
-
-        # input = torch.cat([obs, act], dim=-1)
-        # dm_target = next_obs - obs - self.dynamics_model(input)
-        # rew_target = rew - self.rew_fn(input)
-        # # dm_target, rew_target = dm_target.t(), rew_target.t()
-        # input, dm_target, rew_target = input.unsqueeze(-1).t(), dm_target.unsqueeze(-1), rew_target.unsqueeze(-1)
-
-        # with linear_operator.settings.cholesky_jitter(1e-3):
-        #     try:
-        #         self.dynamics_gp.update_cache(input, dm_target)
-        #         self.rew_gp.update_cache(input, rew_target)  
-        #     except:
-        #         warnings.warn("Cholesky decomposition failed. Skipping cache update.")  
-
     @torch.no_grad()
     def corrected_next(self, z, a):
-        x = torch.cat([z, a], dim=-1)
-
         # original predictions
-        z_pred = z.clone().detach() + self.dynamics_model(x) 
-        r_pred = self.rew_fn(x)
+        z_pred, r_pred = self.next(z, a)
 
         if not self.cache:
             return z_pred, r_pred
 
         # gp orrections
-        z_corr = self.dynamics_gp.mean_inference(x).t()
+        z_corr = self.dynamics_gp.mean_inference(torch.cat([z, a], dim=-1)).t()
         # r_corr = self.rew_gp.mean_inference(x).t()
 
         return z_pred + z_corr, r_pred #+ r_corr
@@ -622,4 +627,3 @@ class GPTDMPC(TDMPC):
             discount *= self.cfg.discount
         G += discount * self.Q(z, self.pi(z, self.cfg.min_std)) # terminal value
         return G
-

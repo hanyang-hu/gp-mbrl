@@ -56,11 +56,12 @@ class Flatten(nn.Module):
 def Encoder(cfg):
 	"""Returns a TOLD encoder."""
 	if cfg.modality == 'pixels':
-		C = int(3*cfg.frame_stack)
+		C = int(6)
 		layers = [NormalizeImg(),
-				  nn.Conv2d(C, cfg.num_channels, 5, stride=2), nn.ELU(),
-                  nn.Conv2d(cfg.num_channels, cfg.num_channels, 5, stride=2), nn.ELU(),
-				  nn.Conv2d(cfg.num_channels, cfg.num_channels, 3, stride=2), nn.ELU()]
+                  nn.Conv2d(C, cfg.num_channels, 7, stride=2), nn.ReLU(),
+				  nn.Conv2d(cfg.num_channels, cfg.num_channels, 5, stride=2), nn.ReLU(),
+                  nn.Conv2d(cfg.num_channels, cfg.num_channels, 5, stride=2), nn.ReLU(),
+				  nn.Conv2d(cfg.num_channels, cfg.num_channels, 3, stride=2), nn.ReLU()]
 		out_shape = _get_out_shape((C, cfg.img_size, cfg.img_size), layers)
 		layers.extend([Flatten(), nn.Linear(np.prod(out_shape), cfg.latent_dim)])
 	else:
@@ -650,7 +651,7 @@ class ReplayBuffer():
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.capacity = min(cfg.train_steps, cfg.max_buffer_size)
         dtype = torch.float32 if cfg.modality == 'state' else torch.uint8
-        obs_shape = (cfg.obs_dim,) if cfg.modality == 'state' else (3, *cfg.obs_shape[-2:])
+        obs_shape = (cfg.obs_dim,) if cfg.modality == 'state' else (6, *cfg.obs_shape[-2:])
         self._obs = torch.empty((self.capacity+1, *obs_shape), dtype=dtype, device=self.device)
         self._last_obs = torch.empty((self.capacity//cfg.episode_length, *cfg.obs_shape), dtype=dtype, device=self.device)
         self._action = torch.empty((self.capacity, cfg.action_dim), dtype=torch.float32, device=self.device)
@@ -665,7 +666,7 @@ class ReplayBuffer():
         return self
 
     def add(self, episode: Episode):
-        self._obs[self.idx:self.idx+self.cfg.episode_length] = episode.obs[:-1] if self.cfg.modality == 'state' else episode.obs[:-1, -3:]
+        self._obs[self.idx:self.idx+self.cfg.episode_length] = episode.obs[:-1] if self.cfg.modality == 'state' else episode.obs[:-1]
         self._last_obs[self.idx//self.cfg.episode_length] = episode.obs[-1]
         self._action[self.idx:self.idx+self.cfg.episode_length] = episode.action
         self._reward[self.idx:self.idx+self.cfg.episode_length] = episode.reward
@@ -686,7 +687,9 @@ class ReplayBuffer():
     def _get_obs(self, arr, idxs):
         if self.cfg.modality == 'state':
             return arr[idxs]
-        obs = torch.empty((self.cfg.batch_size, 3*self.cfg.frame_stack, *arr.shape[-2:]), dtype=arr.dtype, device=torch.device('cuda'))
+        else:
+            return arr[idxs].cuda().float()
+        obs = torch.empty((self.cfg.batch_size, 6, *arr.shape[-2:]), dtype=arr.dtype, device=torch.device('cuda'))
         obs[:, -3:] = arr[idxs].cuda()
         _idxs = idxs.clone()
         mask = torch.ones_like(_idxs, dtype=torch.bool)
@@ -705,7 +708,7 @@ class ReplayBuffer():
         weights /= weights.max()
 
         obs = self._get_obs(self._obs, idxs)
-        next_obs_shape = self._last_obs.shape[1:] if self.cfg.modality == 'state' else (3*self.cfg.frame_stack, *self._last_obs.shape[-2:])
+        next_obs_shape = self._last_obs.shape[1:] if self.cfg.modality == 'state' else (6, *self._last_obs.shape[-2:])
         next_obs = torch.empty((self.cfg.horizon+1, self.cfg.batch_size, *next_obs_shape), dtype=obs.dtype, device=obs.device)
         action = torch.empty((self.cfg.horizon+1, self.cfg.batch_size, *self._action.shape[1:]), dtype=torch.float32, device=self.device)
         reward = torch.empty((self.cfg.horizon+1, self.cfg.batch_size), dtype=torch.float32, device=self.device)

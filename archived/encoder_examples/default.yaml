@@ -1,13 +1,14 @@
 # environment
 task: "Pendulum-v1"
-exp_name: td_mpc_2
+exp_name: gp_td_mpc_ap
+res_dyna: False # Residual connection in the dynamics model
 save_path: "models/${task}/${exp_name}_${seed}.pt"
-# modality: 'state'
+modality: 'state'
 action_repeat: 1
 discount: 0.99
 episode_length: 200/${action_repeat}
 val_episode_length: 200/${action_repeat}
-train_steps: 6000/${action_repeat}
+train_steps: 7600/${action_repeat}
 
 # misc
 reward_centering: False # Did not see improvement with reward centering on Pendulum-v1
@@ -19,13 +20,6 @@ eval_episodes: 1
 render_eval: True # Remark. True if need to visualize evaluation and render in human mode
 save_video: false
 save_model: false
-
-#pixels:
-modality: "pixels"
-frame_stack: 1
-num_channels: 5
-img_size: 32
-latent_dim: 10
 
 # planning
 iterations: 6
@@ -47,24 +41,30 @@ rho: 0.5
 kappa: 0.1
 lr: 1e-3
 std_schedule: linear(0.5, ${min_std}, 3000)
-horizon_schedule: linear(1, ${horizon}, 1000)
+horizon_schedule: linear(1, ${horizon}, 100)
 per_alpha: 0.6
 per_beta: 0.4
 grad_clip_norm: 10
-seed_steps: 100
+seed_steps: 200
 update_freq: 1
 tau: 0.01
 rew_beta: 5e-4
 
 # gp-learning
-gp_update_num: 200
+gp_update_num: 30
 gp_update_per_iter: 1
-gp_subsample_size: 512
-mem_subsample_size: 200
+gp_simul_subsample_size: 256 # number of samples used for joint training of gp and dynamics model
+gp_prior_subsample_size: 512 # number of samples used for gp prior learning (fine-tuning)
+mem_subsample_size: 300
+snr_coef: 0.0
+gp_loss_coef: 1.0
+gp_learn_error: True # the gp hyperparameter training process considers dynamcis model error
+frozen_encoder: False # freeze the encoder during gp learning
 
 # architecture
 enc_dim: 256
 mlp_dim: 256
+latent_dim: 5
 
 # wandb (insert your own)
 use_wandb: false
