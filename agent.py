@@ -631,7 +631,7 @@ class GPTDMPCvR(TDMPC):
         # Deep Dynamics Kernel
         self.dynamics_likelihood = gpytorch.likelihoods.GaussianLikelihood(batch_shape=torch.Size([cfg.obs_dim+1])).to(self.device)
         self.dynamics_gp = utils.DKLOVC(
-            cfg.obs_dim + cfg.action_dim, cfg.mlp_dim, cfg.obs_dim+1,
+            cfg.obs_dim + cfg.action_dim, cfg.gp_mlp_dim, cfg.obs_dim+1,
             likelihood=self.dynamics_likelihood
         ).to(self.device)
         self.dynamics_gp_mll = gpytorch.mlls.ExactMarginalLogLikelihood(self.dynamics_gp.likelihood, self.dynamics_gp)

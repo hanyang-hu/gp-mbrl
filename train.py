@@ -71,9 +71,9 @@ def train(cfg_path = "./default.yaml", seed=None):
     cfg.action_lower_bound = (env.action_space.low).tolist()
     cfg.action_upper_bound = (env.action_space.high).tolist()
 
-    agent = TDMPC(cfg)
+    # agent = TDMPC(cfg)
     # agent = GPTDMPC(cfg)
-    # agent = GPTDMPCvR(cfg)
+    agent = GPTDMPCvR(cfg)
 
     buffer = ReplayBuffer(cfg)
 

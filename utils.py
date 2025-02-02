@@ -102,13 +102,14 @@ class DKLOVC(gpytorch.models.ExactGP):
     """
     def __init__(
             self, input_dim, hidden_dim, output_dim, likelihood=None,
-            num_inducing_points=256, latent_gp_dim=3, error_tol=1e-6, 
-            subsample_size=256, pivoted_cholesky=True
+            num_inducing_points=256, latent_gp_dim=5, error_tol=1e-6, 
+            subsample_size=256, pivoted_cholesky=True, fps=False
         ):
         if num_inducing_points > subsample_size:
             warnings.warn("Number of inducing points is large. This may lead to slow training.")
         self.subsample_size = subsample_size
         self.pivoted_cholesky = pivoted_cholesky
+        self.fps = fps
 
         # Generate dummy data to initialize the model
         if likelihood is None:
@@ -134,10 +135,10 @@ class DKLOVC(gpytorch.models.ExactGP):
         mu_0, sigma_0 = math.sqrt(2), math.sqrt(3)
         self.mean_module = gpytorch.means.ConstantMean(batch_shape=torch.Size([output_dim]))
         self.covar_module = gpytorch.kernels.ScaleKernel(
-            gpytorch.kernels.RBFKernel(
+            gpytorch.kernels.MaternKernel(
                 ard_num_dims=latent_gp_dim,
                 batch_shape=torch.Size([output_dim]),
-                # nu=1.5,
+                nu=1.5,
                 # lengthscale_prior=gpytorch.priors.LogNormalPrior(
                 #     loc=mu_0+math.log(latent_gp_dim),
                 #     scale=sigma_0,
@@ -204,7 +205,7 @@ class DKLOVC(gpytorch.models.ExactGP):
 
         if self.pivoted_cholesky:
             # Farthest Point Sampling
-            if False:
+            if self.fps:
                 normalized_x = x / self.covar_module.base_kernel.lengthscale
                 idx = farthest_point_sampling(normalized_x, self.subsample_size)
                 subsample_size = idx.shape[-1]
