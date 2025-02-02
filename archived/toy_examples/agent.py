@@ -956,6 +956,7 @@ class MOPOCv2(TDMPC):
         
         # inputs, dm_targets, rew_targets = inputs.t(), dm_targets.t(), rew_targets.t()
         dm_targets, rew_targets = dm_targets.t(), rew_targets.t()
+        print(inputs.shape, dm_targets.shape)
 
         self.dynamics_gp.set_train_data(inputs, dm_targets, strict=False)
         # self.rew_gp.set_train_data(inputs, rew_targets, strict=False)
