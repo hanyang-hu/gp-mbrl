@@ -1,14 +1,16 @@
 # environment
 task: "Pendulum-v1"
-exp_name: td_mpc
+exp_name: gp_td_mpc_dkl
+kernel: "SM" # if "NA", do not use GP
 res_dyna: False # Residual connection in the dynamics model
-save_path: "models/${task}/${exp_name}_${seed}.pt"
+save_path: "models/${task}/${exp_name}_${kernel}_${seed}.pt"
 modality: 'state'
 action_repeat: 1
 discount: 0.99
 episode_length: 200/${action_repeat}
 val_episode_length: 200/${action_repeat}
 train_steps: 3000/${action_repeat}
+seed_steps: 800
 
 # misc
 reward_centering: False # Did not see improvement with reward centering on Pendulum-v1
@@ -40,28 +42,36 @@ consistency_coef: 2
 rho: 0.5
 kappa: 0.1
 lr: 1e-3
-std_schedule: linear(0.5, ${min_std}, 1000)
-horizon_schedule: linear(1, ${horizon}, 1000)
+std_schedule: linear(0.5, ${min_std}, 2000)
+horizon_schedule: linear(1, ${horizon}, 50)
 per_alpha: 0.6
 per_beta: 0.4
 grad_clip_norm: 10
-seed_steps: 200
 update_freq: 1
 tau: 0.01
 rew_beta: 5e-4
 
 # gp-learning
-gp_update_num: 50
+gp_update_num: 0
 gp_update_per_iter: 1
 gp_simul_subsample_size: 256 # number of samples used for joint training of gp and dynamics model
-gp_prior_subsample_size: 256 # number of samples used for gp prior learning (fine-tuning)
-mem_subsample_size: 300
-snr_coef: 10.0
+gp_prior_subsample_size: 512 # number of samples used for gp prior learning (fine-tuning)
+snr_coef: 0.0
 gp_loss_coef: 1.0
 gp_learn_error: True # the gp hyperparameter training process considers dynamcis model error
 frozen_encoder: False # freeze the encoder during gp learning
 snr_tau: 10
 snr_p: 8
+
+# OVC/DKLOVC specific
+num_inducing_points: 512 # maximum number of inducing points
+latent_gp_dim: 3 # latent dimension of each independent GP, if using DKL
+error_tol: 1e-6
+subsample_size: 2048 # points subsampled by FPS (O(NM)) before using pivoted cholesky (O(N^3))
+pivoted_cholesky: True
+fps: True # do not use FPS when the total amount of data is small
+use_DKL: False
+use_DSP: False
 
 # architecture
 enc_dim: 256
@@ -72,11 +82,3 @@ latent_dim: 5
 use_wandb: false
 wandb_project: none
 wandb_entity: none
-
-
-# def __init__(
-#         self, input_dim, hidden_dim, output_dim, likelihood=None,
-#         num_inducing_points=256, latent_gp_dim=3, error_tol=1e-6, 
-#         subsample_size=256, pivoted_cholesky=False
-#     )
-

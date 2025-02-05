@@ -98,18 +98,20 @@ class FeatureExtractor(nn.Module):
 
 class DKLOVC(gpytorch.models.ExactGP):
     """
-    DKL with OVC cache for constant-time update and inference.
+    OVC with DKL for constant-time GP inference.
     """
     def __init__(
             self, input_dim, hidden_dim, output_dim, likelihood=None,
             num_inducing_points=256, latent_gp_dim=5, error_tol=1e-6, 
-            subsample_size=256, pivoted_cholesky=True, fps=False
+            subsample_size=256, pivoted_cholesky=True, fps=False,
+            use_DKL=True, use_DSP=True, kernel="Matern"
         ):
         if num_inducing_points > subsample_size:
             warnings.warn("Number of inducing points is large. This may lead to slow training.")
         self.subsample_size = subsample_size
         self.pivoted_cholesky = pivoted_cholesky
         self.fps = fps
+        self.use_DKL = use_DKL
 
         # Generate dummy data to initialize the model
         if likelihood is None:
@@ -120,32 +122,53 @@ class DKLOVC(gpytorch.models.ExactGP):
             likelihood=likelihood
         )
 
+        self.input_dim = input_dim
         self.latent_gp_dim = latent_gp_dim
         self.output_dim = output_dim
         
-        self.feature_extractor = FeatureExtractor(input_dim, hidden_dim, output_dim * latent_gp_dim)
-        # self.feature_extractor = lambda x : x.view(1, -1).repeat(4, 1).t()
-        
-        grid_bound = (-1., 1.) # output of feature extractor is in (-1, 1) (due to the Tanh activation)
-        grid_bounds = [grid_bound,] * latent_gp_dim
-        self.grid_bounds = grid_bounds
-        # self.scale_to_bounds = gpytorch.utils.grid.ScaleToBounds(grid_bound[0], grid_bound[1])
-        self.scale_to_bounds = torch.nn.Tanh()
+        if self.use_DKL:
+            self.feature_extractor = FeatureExtractor(input_dim, hidden_dim, output_dim * latent_gp_dim)
 
-        mu_0, sigma_0 = math.sqrt(2), math.sqrt(3)
         self.mean_module = gpytorch.means.ConstantMean(batch_shape=torch.Size([output_dim]))
-        self.covar_module = gpytorch.kernels.ScaleKernel(
-            gpytorch.kernels.MaternKernel(
-                ard_num_dims=latent_gp_dim,
+        if kernel == "RBF":
+            self.covar_module = gpytorch.kernels.ScaleKernel(
+                gpytorch.kernels.RBFKernel(
+                    ard_num_dims=latent_gp_dim if self.use_DKL else input_dim,
+                    batch_shape=torch.Size([output_dim]),
+                    lengthscale_prior=gpytorch.priors.LogNormalPrior(
+                        loc=math.sqrt(2)+math.log(latent_gp_dim if self.use_DKL else input_dim),
+                        scale=math.sqrt(3),
+                    ) if use_DSP else None
+                ),
                 batch_shape=torch.Size([output_dim]),
-                nu=1.5,
-                # lengthscale_prior=gpytorch.priors.LogNormalPrior(
-                #     loc=mu_0+math.log(latent_gp_dim),
-                #     scale=sigma_0,
-                # )
-            ),
-            batch_shape=torch.Size([output_dim]),
-        )
+            )
+            print("Using RBF Kernel.")
+        elif kernel == "Matern":
+            self.covar_module = gpytorch.kernels.ScaleKernel(
+                gpytorch.kernels.MaternKernel(
+                    ard_num_dims=latent_gp_dim if self.use_DKL else input_dim,
+                    nu=1.5,
+                    batch_shape=torch.Size([output_dim]),
+                    lengthscale_prior=gpytorch.priors.LogNormalPrior(
+                        loc=math.sqrt(2)+math.log(latent_gp_dim if self.use_DKL else input_dim),
+                        scale=math.sqrt(3),
+                    ) if use_DSP else None
+                ),
+                batch_shape=torch.Size([output_dim]),
+            )
+            print("Using Matern Kernel.")
+        elif kernel == "SM":
+            self.covar_module = gpytorch.kernels.ScaleKernel(
+                gpytorch.kernels.SpectralMixtureKernel(
+                    num_mixtures=4,
+                    ard_num_dims=latent_gp_dim if self.use_DKL else input_dim,
+                    batch_shape=torch.Size([output_dim]),
+                ),
+                batch_shape=torch.Size([output_dim]),
+            )
+            print("Using Spectral Mixture Kernel.")
+        else:
+            raise ValueError("Invalid kernel type. Must be one of 'RBF', 'Matern', 'SM'.")
 
         self.num_inducing_points = num_inducing_points
         self.pseudo_inputs = None
@@ -191,8 +214,13 @@ class DKLOVC(gpytorch.models.ExactGP):
         if not self.eval():
             raise RuntimeError("Model must be in eval mode to update cache.")
         
-        x = self.feature_extractor(x).t()
-        x = x.reshape(self.output_dim, self.latent_gp_dim, -1).permute(0, 2, 1)
+        if self.use_DKL:
+            x = self.feature_extractor(x).t()
+            x = x.reshape(self.output_dim, self.latent_gp_dim, -1).permute(0, 2, 1)
+        else:
+            # expand and convert x from (batch_size, input_dim) to (output_dim, batch_size, input_dim)
+            x = x.unsqueeze(0).expand(self.output_dim, -1, -1)
+
         y = (y - self.mean_module(x)).unsqueeze(-1)
         noise_inv = self.likelihood.noise ** -1
         pseudo_inputs = None
@@ -206,10 +234,14 @@ class DKLOVC(gpytorch.models.ExactGP):
         if self.pivoted_cholesky:
             # Farthest Point Sampling
             if self.fps:
-                normalized_x = x / self.covar_module.base_kernel.lengthscale
+                if self.covar_module.base_kernel.lengthscale is not None:
+                    normalized_x = x / self.covar_module.base_kernel.lengthscale
+                else:
+                    normalized_x = x
                 idx = farthest_point_sampling(normalized_x, self.subsample_size)
                 subsample_size = idx.shape[-1]
-                idx = idx.unsqueeze(-1).expand(self.output_dim, subsample_size, self.latent_gp_dim)
+                expand_dim = self.latent_gp_dim if self.use_DKL else self.input_dim
+                idx = idx.unsqueeze(-1).expand(self.output_dim, subsample_size, expand_dim)
                 subsampled_x = x.gather(1, idx)
             else:
                 subsampled_x = x
@@ -222,14 +254,16 @@ class DKLOVC(gpytorch.models.ExactGP):
             )
             rank = L.shape[-1]
             pivots = pivots[:,:rank] # (output_dim, rank)
-            pivots = pivots.unsqueeze(-1).expand(self.output_dim, rank, self.latent_gp_dim)
+            expand_dim = self.latent_gp_dim if self.use_DKL else self.input_dim
+            pivots = pivots.unsqueeze(-1).expand(self.output_dim, rank, expand_dim)
             new_pseudo_inputs = subsampled_x.gather(1, pivots)
         else:
             # Farthest Point Sampling
             normalized_x = x / self.covar_module.base_kernel.lengthscale
             idx = farthest_point_sampling(normalized_x, self.num_inducing_points)
             subsample_size = idx.shape[-1]
-            idx = idx.unsqueeze(-1).expand(self.output_dim, subsample_size, self.latent_gp_dim)
+            expand_dim = self.latent_gp_dim if self.use_DKL else self.input_dim
+            idx = idx.unsqueeze(-1).expand(self.output_dim, subsample_size, expand_dim)
             new_pseudo_inputs = x.gather(1, idx)
 
         # OVC update
@@ -260,8 +294,9 @@ class DKLOVC(gpytorch.models.ExactGP):
 
     @torch.no_grad()
     def mean_inference(self, x):
-        x = self.feature_extractor(x).t()
-        x = x.reshape(self.output_dim, self.latent_gp_dim, -1).permute(0, 2, 1)
+        if self.use_DKL:
+            x = self.feature_extractor(x).t()
+            x = x.reshape(self.output_dim, self.latent_gp_dim, -1).permute(0, 2, 1)
 
         mean = self.mean_module(x)
         covar = self.covar_module(x, self.pseudo_inputs)
@@ -273,8 +308,9 @@ class DKLOVC(gpytorch.models.ExactGP):
         Input shape: (input_dim, batch_shape)
         Output mean shape: (output_dim, batch_shape)
         """
-        x = self.feature_extractor(x).t()
-        x = x.reshape(self.output_dim, self.latent_gp_dim, -1).permute(0, 2, 1)
+        if self.use_DKL:
+            x = self.feature_extractor(x).t()
+            x = x.reshape(self.output_dim, self.latent_gp_dim, -1).permute(0, 2, 1)
         mean = self.mean_module(x)
         covar = self.covar_module(x)
         return gpytorch.distributions.MultivariateNormal(mean, covar)  

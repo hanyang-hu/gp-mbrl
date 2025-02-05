@@ -345,306 +345,43 @@ class TDMPC(Agent):
             }
         
 
+"""
+GP-TD-MPC
+"""
 class GPTDMPC(TDMPC):
-    def __init__(self, cfg):
-        super().__init__(cfg)
-
-        # Deep Dynamics Kernel
-        self.dynamics_likelihood = gpytorch.likelihoods.GaussianLikelihood(batch_shape=torch.Size([cfg.obs_dim])).to(self.device)
-        self.dynamics_gp = utils.DKLOVC(
-            cfg.obs_dim + cfg.action_dim, cfg.mlp_dim, cfg.obs_dim,
-            likelihood=self.dynamics_likelihood
-        ).to(self.device)
-        self.dynamics_gp_mll = gpytorch.mlls.ExactMarginalLogLikelihood(self.dynamics_gp.likelihood, self.dynamics_gp)
-
-        self.gp_optim = torch.optim.Adam(
-            [
-                {'params': self.dynamics_gp.feature_extractor.parameters(), 'weight_decay': 1e-4},
-                {'params': self.dynamics_gp.mean_module.parameters()},
-                {'params': self.dynamics_gp.covar_module.parameters(), 'lr': cfg.lr},
-                {'params': self.dynamics_likelihood.parameters(), 'lr': cfg.lr},
-            ],
-            lr=self.cfg.lr
-        )
-
-        # Turn to eval
-        self.dynamics_gp.eval()
-        self.dynamics_likelihood.eval()
-
-        self.cache = False
-
-    def to_eval(self):
-        super().to_eval()
-
-        self.dynamics_gp.eval()
-        self.dynamics_likelihood.eval()
-
-    def to_train(self):
-        super().to_train()
-
-        self.dynamics_gp.train()
-        self.dynamics_likelihood.train()
-
-    def update(self, replay_buffer, step):
-        with torch.autograd.set_detect_anomaly(False):
-            obs, next_obses, action, reward, idxs, weights = replay_buffer.sample()
-
-            # Reset action to a leaf node
-            action = action.detach()
-
-            # Centering reward signals
-            if self.cfg.reward_centering:
-                centered_reward = reward - self.rew_ctr
-            else:
-                centered_reward = reward
-
-            self.optim.zero_grad(set_to_none=True)
-            self.gp_optim.zero_grad(set_to_none=True)
-            self.std = utils.linear_schedule(self.cfg.std_schedule, step)
-            
-            # Turn to train
-            self.to_train()
-
-            # Do not encode representation
-            z = [None] * (self.cfg.horizon + 1)
-            # z[0] = self.encoder(obs)
-            z[0] = obs.clone()
-
-            batch_size = obs.size(0)
-            consistency_loss, reward_loss, value_loss, priority_loss = (torch.zeros(batch_size, device=obs.device),) * 4
-            
-            for t in range(self.cfg.horizon):
-                # Predictions
-                Q1, Q2 = self.q1_net(z[t], action[t]), self.q2_net(z[t], action[t])
-                z[t+1], reward_pred = self.next(z[t], action[t]) # z[t+1] is the prediction
-
-                next_obs = next_obses[t]
-                # next_z = self.encoder_target(next_obs).detach() 
-                next_z = next_obs.clone().detach() # no encoding (supposedly from target encoder)
-                td_target = self._td_target(next_obs, centered_reward[t]).detach()
-
-                # Losses
-                rho = (self.cfg.rho ** t)
-                consistency_loss += rho * torch.mean(utils.mse(z[t+1], next_z), dim=1)
-                reward_loss += rho * utils.mse(reward_pred, centered_reward[t]).squeeze(1)
-                value_loss += rho * (utils.mse(Q1, td_target) + utils.mse(Q2, td_target)).squeeze(1)
-                priority_loss += rho * (utils.l1(Q1, td_target) + utils.l1(Q2, td_target)).squeeze(1)
-
-            # Compute TD-MPC loss
-            total_loss = self.cfg.consistency_coef * consistency_loss.clamp(max=1e4) + \
-                        self.cfg.reward_coef * reward_loss.clamp(max=1e4) + \
-                        self.cfg.value_coef * value_loss.clamp(max=1e4)
-
-            weighted_loss = (total_loss * weights).mean()
-            weighted_loss.register_hook(lambda grad: grad * (1/self.cfg.horizon)) 
-
-            # Compute GP loss
-            gp_obs = self.memory["obs"][:self.current_step+1]
-            gp_act = self.memory["act"][:self.current_step+1]
-            gp_next_obs = self.memory["next_obs"][:self.current_step+1]
-            memory_size = gp_obs.size(0)
-
-            # Subsample data uniformly instead of from PER
-            subsample_size = min(memory_size, self.cfg.gp_simul_subsample_size)
-            gp_idxs = torch.randperm(memory_size)[:subsample_size]
-            gp_obs, gp_act, gp_next_obs = gp_obs[gp_idxs], gp_act[gp_idxs], gp_next_obs[gp_idxs]
-
-            # Compute inputs and targets
-            # if self.cfg.frozen_encoder: # Gradient does not backpropagate to the encoder
-            #     gp_z = self.encoder(gp_obs).detach()
-            #     gp_next_z = self.encoder(gp_next_obs).detach()
-            # else:
-            #     gp_z = self.encoder(gp_obs)
-            #     gp_next_z = self.encoder_target(gp_next_obs).detach()
-            gp_z = gp_obs.clone().detach()
-            gp_next_z = gp_next_obs.clone().detach()
-            gp_inputs = torch.cat([gp_z, gp_act], dim=-1)
-
-            if self.cfg.gp_learn_error: 
-                gp_z_pred, _ = self.next(gp_z, gp_act) # prediction from the original dynamics model
-                dm_targets = (gp_next_z - gp_z_pred).detach()
-            else:
-                dm_targets = gp_next_z.detach() # GP hyperparameters only considers the ground-truth, does not consider the original prediction error
-            dm_targets = dm_targets.t()
-
-            # Compute GP loss
-            self.dynamics_gp.set_train_data(gp_inputs, dm_targets, strict=False)
-            gp_output = self.dynamics_gp(gp_inputs)
-            gp_loss = -self.dynamics_gp_mll(gp_output, dm_targets).mean()
-
-            # Compute signal-to-noise penalty (see https://github.com/EmbodiedVision/dlgpd/blob/master/dlgpd/models/gp.py)
-            tau, p = self.cfg.snr_tau, self.cfg.snr_p
-            output_scale = self.dynamics_gp.covar_module.outputscale ** 0.5
-            noise_variance = self.dynamics_gp.likelihood.noise_covar.noise.squeeze(-1) ** 0.5
-            snr = output_scale / noise_variance
-            snr_penalty = (torch.log(snr) / math.log(tau)).pow(p).sum()
-            gp_loss += self.cfg.snr_coef * snr_penalty
-            gp_loss *= self.cfg.gp_loss_coef
-
-            weighted_loss.backward()
-            gp_loss.backward()
-
-            # Clip gradients
-            # torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
-            torch.nn.utils.clip_grad_norm_(self.dynamics_model.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
-            torch.nn.utils.clip_grad_norm_(self.q1_net.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
-            torch.nn.utils.clip_grad_norm_(self.q2_net.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
-            torch.nn.utils.clip_grad_norm_(self.rew_fn.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
-
-            self.optim.step()
-            self.gp_optim.step()
-            
-            replay_buffer.update_priorities(idxs, priority_loss.clamp(max=1e4).detach())
-
-            # Update policy + target network
-            pi_loss = self.update_pi([z_t.detach() for z_t in z])
-            if step % self.cfg.update_freq == 0:
-                self.ema(self.cfg.tau)
-
-            # Turn to eval
-            self.to_eval()
-
-            return {
-                'consistency_loss': float(consistency_loss.mean().item()),
-                'reward_loss': float(reward_loss.mean().item()),
-                'value_loss': float(value_loss.mean().item()),
-                'pi_loss': pi_loss,
-                'total_loss': float(total_loss.mean().item()),
-                'weighted_loss': float(weighted_loss.mean().item()),
-                'gp_loss': gp_loss.item()
-            }
-
-    def update_gp_prior(self):
-        self.gp_optim.zero_grad(set_to_none=True)
-
-        # Compute GP loss
-        gp_obs = self.memory["obs"][:self.current_step+1]
-        gp_act = self.memory["act"][:self.current_step+1]
-        gp_next_obs = self.memory["next_obs"][:self.current_step+1]
-        memory_size = gp_obs.size(0)
-
-        # Subsample data uniformly instead of from PER
-        subsample_size = min(memory_size, self.cfg.gp_prior_subsample_size)
-        gp_idxs = torch.randperm(memory_size)[:subsample_size]
-        gp_obs, gp_act, gp_next_obs = gp_obs[gp_idxs], gp_act[gp_idxs], gp_next_obs[gp_idxs]
-
-        # Compute inputs and targets (with frozen encoder for fine-tuning)
-        # gp_z = self.encoder(gp_obs).detach()
-        # gp_next_z = self.encoder(gp_next_obs).detach()
-        gp_z = gp_obs.clone().detach()
-        gp_next_z = gp_next_obs.clone().detach()
-        gp_inputs = torch.cat([gp_z, gp_act], dim=-1)
-
-        if self.cfg.gp_learn_error: 
-            gp_z_pred, _ = self.next(gp_z, gp_act) # prediction from the original dynamics model
-            dm_targets = (gp_next_z - gp_z_pred).detach()
-        else:
-            dm_targets = gp_next_z.detach() # GP hyperparameters only considers the ground-truth, does not consider the original prediction error
-        dm_targets = dm_targets.t()
-
-        # Compute GP loss
-        self.dynamics_gp.set_train_data(gp_inputs, dm_targets, strict=False)
-        gp_output = self.dynamics_gp(gp_inputs)
-        gp_loss = -self.dynamics_gp_mll(gp_output, dm_targets).mean()
-
-        # Compute signal-to-noise penalty (see https://github.com/EmbodiedVision/dlgpd/blob/master/dlgpd/models/gp.py)
-        tau, p = self.cfg.snr_tau, self.cfg.snr_p
-        output_scale = self.dynamics_gp.covar_module.outputscale ** 0.5
-        noise_variance = self.dynamics_gp.likelihood.noise_covar.noise.squeeze(-1) ** 0.5
-        snr = output_scale / noise_variance
-        snr_penalty = (torch.log(snr) / math.log(tau)).pow(p).sum()
-        gp_loss += self.cfg.snr_coef * snr_penalty
-        gp_loss *= self.cfg.gp_loss_coef
-
-        gp_loss.backward()
-        self.gp_optim.step()
-
-        return gp_loss.item()
-
-
-    @torch.no_grad()
-    def compute_cache(self):
-        print("Computing cache...")
-        self.cache = True 
-
-        # Fetch data from memory
-        window_size = self.current_step+1 # all data in the memory
-        obs = self.memory["obs"][max(0, self.current_step+1-window_size):self.current_step+1]
-        act = self.memory["act"][max(0, self.current_step+1-window_size):self.current_step+1]
-        next_obs = self.memory["next_obs"][max(0, self.current_step+1-window_size):self.current_step+1]
-
-        # Compute input and targets
-        # z = self.encoder(obs)
-        # next_z = self.encoder(next_obs)
-        z = obs.clone()
-        next_z = next_obs.clone()
-        z_pred, _ = self.next(z, act)
-        inputs = torch.cat([z, act], dim=-1)
-        dm_targets = next_z - z_pred # GP updates the prediction error of the original dynamics model
-        dm_targets = dm_targets.t()
-
-        # Set train data and compute cache
-        with linear_operator.settings.cholesky_jitter(1e-2):
-            self.dynamics_gp.clear_cache(inputs, dm_targets)  
-            print("Dynamics GP Rank: ", self.dynamics_gp.m_u.shape)
-
-    @torch.no_grad()
-    def correction(self, obs, act, rew, next_obs, step):
-        super().correction(obs, act, rew, next_obs, step)
-
-    @torch.no_grad()
-    def corrected_next(self, z, a):
-        # original predictions
-        z_pred, r_pred = self.next(z, a)
-
-        if not self.cache:
-            return z_pred, r_pred
-
-        # gp orrections
-        z_corr = self.dynamics_gp.mean_inference(torch.cat([z, a], dim=-1)).t()
-        # r_corr = self.rew_gp.mean_inference(x).t()
-
-        return z_pred + z_corr, r_pred #+ r_corr
-
-    @torch.no_grad()
-    def estimate_value(self, z, actions, horizon):
-        """
-        Use the corrected_next method to estimate the value.
-        """
-        G, discount = 0, 1
-        for t in range(horizon):
-            z, reward = self.corrected_next(z, actions[t])
-            G += discount * reward
-            discount *= self.cfg.discount
-        G += discount * self.Q(z, self.pi(z, self.cfg.min_std)) # terminal value
-        return G
-
-
-
-"""
-GP-TD-MPC with reward correction
-"""
-class GPTDMPCvR(TDMPC):
     def __init__(self, cfg):
         super().__init__(cfg)
 
         # Deep Dynamics Kernel
         self.dynamics_likelihood = gpytorch.likelihoods.GaussianLikelihood(batch_shape=torch.Size([cfg.obs_dim+1])).to(self.device)
         self.dynamics_gp = utils.DKLOVC(
-            cfg.obs_dim + cfg.action_dim, cfg.gp_mlp_dim, cfg.obs_dim+1,
-            likelihood=self.dynamics_likelihood
+            cfg.obs_dim + cfg.action_dim, cfg.mlp_dim, cfg.obs_dim+1,
+            likelihood=self.dynamics_likelihood, num_inducing_points=cfg.num_inducing_points,
+            latent_gp_dim=cfg.latent_gp_dim, error_tol=cfg.error_tol, subsample_size=cfg.subsample_size, 
+            pivoted_cholesky=cfg.pivoted_cholesky, fps=cfg.fps, use_DKL=cfg.use_DKL, use_DSP=cfg.use_DSP,
+            kernel=cfg.kernel
         ).to(self.device)
         self.dynamics_gp_mll = gpytorch.mlls.ExactMarginalLogLikelihood(self.dynamics_gp.likelihood, self.dynamics_gp)
 
-        self.gp_optim = torch.optim.Adam(
-            [
-                {'params': self.dynamics_gp.feature_extractor.parameters(), 'weight_decay': 1e-4},
-                {'params': self.dynamics_gp.mean_module.parameters()},
-                {'params': self.dynamics_gp.covar_module.parameters(), 'lr': cfg.lr},
-                {'params': self.dynamics_likelihood.parameters(), 'lr': cfg.lr},
-            ],
-            lr=self.cfg.lr
-        )
+        if cfg.use_DKL:
+            self.gp_optim = torch.optim.Adam(
+                [
+                    {'params': self.dynamics_gp.feature_extractor.parameters(), 'weight_decay': 1e-4},
+                    {'params': self.dynamics_gp.mean_module.parameters()},
+                    {'params': self.dynamics_gp.covar_module.parameters(), 'lr': cfg.lr},
+                    {'params': self.dynamics_likelihood.parameters(), 'lr': cfg.lr},
+                ],
+                lr=self.cfg.lr
+            )
+        else:
+            self.gp_optim = torch.optim.Adam(
+                [
+                    {'params': self.dynamics_gp.mean_module.parameters()},
+                    {'params': self.dynamics_gp.covar_module.parameters(), 'lr': cfg.lr},
+                    {'params': self.dynamics_likelihood.parameters(), 'lr': cfg.lr},
+                ],
+                lr=self.cfg.lr
+            )
 
         # Turn to eval
         self.dynamics_gp.eval()
