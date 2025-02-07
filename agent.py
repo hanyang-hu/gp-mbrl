@@ -366,7 +366,7 @@ class GPTDMPC(TDMPC):
         if cfg.use_DKL:
             self.gp_optim = torch.optim.Adam(
                 [
-                    {'params': self.dynamics_gp.feature_extractor.parameters(), 'weight_decay': 1e-4},
+                    {'params': self.dynamics_gp.feature_extractor.parameters(), 'weight_decay': 1e-4 if cfg.DKL_weiht_decay else 0},
                     {'params': self.dynamics_gp.mean_module.parameters()},
                     {'params': self.dynamics_gp.covar_module.parameters(), 'lr': cfg.lr},
                     {'params': self.dynamics_likelihood.parameters(), 'lr': cfg.lr},

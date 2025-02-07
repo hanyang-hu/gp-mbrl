@@ -53,7 +53,7 @@ def evaluate(env, agent, num_episodes, step, episode_length, action_repeat, rend
     return np.nanmean(episode_rewards)
 
 
-def train(cfg_path = "./default.yaml", seed=None, kernel=None):
+def train(cfg_path = "./configs/default.yaml", seed=None, kernel=None):
     cfg = OmegaConf.load(cfg_path)
     
     # Set random seeds for reproducibility
@@ -182,7 +182,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Train TD-MPC")
-    parser.add_argument("--cfg_path", type=str, default="./default.yaml", help="Path to config file")
+    parser.add_argument("--cfg_path", type=str, default="./configs/default.yaml", help="Path to config file")
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
     parser.add_argument("--kernel", type=str, default=None, help="Kernel type")
     args = parser.parse_args()
