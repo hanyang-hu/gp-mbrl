@@ -1,16 +1,16 @@
 # environment
-task: "Pusher-v5"
-exp_name: gp_td_mpc
+task: "Reacher-v4"
+exp_name: gp_td_mpc_dkl
 kernel: "SM" # if "NA", do not use GP
 res_dyna: False # Residual connection in the dynamics model
 save_path: "models/${task}/${exp_name}_${kernel}_${seed}.pt"
 modality: 'state'
 action_repeat: 1
 discount: 0.99
-episode_length: 100/${action_repeat}
-val_episode_length: 100/${action_repeat}
-train_steps: 3000/${action_repeat}
-seed_steps: 800
+episode_length: 50/${action_repeat}
+val_episode_length: 50/${action_repeat}
+train_steps: 1000/${action_repeat}
+seed_steps: 300
 
 # misc
 reward_centering: False # Did not see improvement with reward centering on Pendulum-v1
@@ -42,7 +42,7 @@ consistency_coef: 2
 rho: 0.5
 kappa: 0.1
 lr: 1e-3
-std_schedule: linear(0.5, ${min_std}, 2000)
+std_schedule: linear(0.5, ${min_std}, 600)
 horizon_schedule: linear(1, ${horizon}, 50)
 per_alpha: 0.6
 per_beta: 0.4
@@ -64,13 +64,13 @@ snr_tau: 10
 snr_p: 8
 
 # OVC/DKLOVC specific
-num_inducing_points: 256 # maximum number of inducing points
-latent_gp_dim: 5 # latent dimension of each independent GP, if using DKL
+num_inducing_points: 512 # maximum number of inducing points
+latent_gp_dim: 3 # latent dimension of each independent GP, if using DKL
 error_tol: 1e-6
 subsample_size: 2048 # points subsampled by FPS (O(NM)) before using pivoted cholesky (O(N^3))
 pivoted_cholesky: True
 fps: False # do not use FPS when the total amount of data is small
-use_DKL: False
+use_DKL: True
 DKL_weiht_decay: False
 use_DSP: False
 
@@ -83,3 +83,4 @@ latent_dim: 5
 use_wandb: false
 wandb_project: none
 wandb_entity: none
+

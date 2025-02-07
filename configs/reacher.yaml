@@ -10,7 +10,7 @@ discount: 0.99
 episode_length: 50/${action_repeat}
 val_episode_length: 50/${action_repeat}
 train_steps: 1000/${action_repeat}
-seed_steps: 200
+seed_steps: 300
 
 # misc
 reward_centering: False # Did not see improvement with reward centering on Pendulum-v1
@@ -69,7 +69,7 @@ latent_gp_dim: 3 # latent dimension of each independent GP, if using DKL
 error_tol: 1e-6
 subsample_size: 2048 # points subsampled by FPS (O(NM)) before using pivoted cholesky (O(N^3))
 pivoted_cholesky: True
-fps: True # do not use FPS when the total amount of data is small
+fps: False # do not use FPS when the total amount of data is small
 use_DKL: False
 DKL_weiht_decay: False
 use_DSP: False

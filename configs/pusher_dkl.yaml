@@ -1,6 +1,6 @@
 # environment
 task: "Pusher-v5"
-exp_name: gp_td_mpc
+exp_name: gp_td_mpc_dkl
 kernel: "SM" # if "NA", do not use GP
 res_dyna: False # Residual connection in the dynamics model
 save_path: "models/${task}/${exp_name}_${kernel}_${seed}.pt"
@@ -70,7 +70,7 @@ error_tol: 1e-6
 subsample_size: 2048 # points subsampled by FPS (O(NM)) before using pivoted cholesky (O(N^3))
 pivoted_cholesky: True
 fps: False # do not use FPS when the total amount of data is small
-use_DKL: False
+use_DKL: True
 DKL_weiht_decay: False
 use_DSP: False
 
