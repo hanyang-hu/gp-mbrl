@@ -64,7 +64,7 @@ snr_tau: 10
 snr_p: 8
 
 # OVC/DKLOVC specific
-num_inducing_points: 512 # maximum number of inducing points
+num_inducing_points: 256 # maximum number of inducing points
 latent_gp_dim: 3 # latent dimension of each independent GP, if using DKL
 error_tol: 1e-6
 subsample_size: 2048 # points subsampled by FPS (O(NM)) before using pivoted cholesky (O(N^3))

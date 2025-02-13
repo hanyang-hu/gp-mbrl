@@ -108,7 +108,7 @@ def train(cfg_path = "./configs/default.yaml", seed=None, kernel=None):
 
         # Update model
         if step >= cfg.seed_steps:
-            num_updates = cfg.seed_steps if step == cfg.seed_steps else cfg.episode_length
+            num_updates = max(400, cfg.seed_steps) if step == cfg.seed_steps else max(100, cfg.episode_length)
             progress_bar = tqdm.tqdm(range(num_updates), desc=f"Episode {episode_idx}")
             
             # agent.ori_encoder = copy.deepcopy(agent.encoder)

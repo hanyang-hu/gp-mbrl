@@ -56,8 +56,12 @@ gp_td_mpc_no_error_RBF_mean = np.mean([df["episode_reward"] for df in gp_td_mpc_
 
 timesteps = td_mpc[0]["env_step"]
 
-# plot
-fig, ax1 = plt.subplots(figsize=(10, 6))
+# Plot performance and number of inducing points in subplots
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+
+fig.tight_layout(pad=5.0)
+
+# Plot performance
 ax1.plot(timesteps, td_mpc_mean, label="TD-MPC", color="black", marker="o")
 ax1.plot(timesteps, gp_td_mpc_RBF_mean, label="GP-TD-MPC (RBF)", color="red", marker="s")
 ax1.plot(timesteps, gp_td_mpc_matern_mean, label="GP-TD-MPC (Matérn-3/2)", color="lime", marker="s")
@@ -67,11 +71,29 @@ ax1.plot(timesteps, gp_td_mpc_dkl_SM_mean, label="GP-TD-MPC (DKL + SM)", color="
 
 ax1.set_xlabel("Timesteps")
 ax1.set_ylabel("Total Reward")
-ax1.set_title("Pendulum-v1")
+ax1.set_title("Performance Comparison (Pendulum-v1)")
 
-# legend
-ax1.legend()
+# Plot number of inducing points
+gp_td_mpc_RBF_num_inducing_points = np.mean([df["num_inducing_points"] for df in gp_td_mpc_RBF], axis=0)
+gp_td_mpc_matern_num_inducing_points = np.mean([df["num_inducing_points"] for df in gp_td_mpc_matern], axis=0)
+gp_td_mpc_dkl_RBF_num_inducing_points = np.mean([df["num_inducing_points"] for df in gp_td_mpc_dkl_RBF], axis=0)
+gp_td_mpc_dkl_matern_num_inducing_points = np.mean([df["num_inducing_points"] for df in gp_td_mpc_dkl_matern], axis=0)
+gp_td_mpc_dkl_SM_num_inducing_points = np.mean([df["num_inducing_points"] for df in gp_td_mpc_dkl_SM], axis=0)
+gp_td_mpc_no_error_RBF_num_inducing_points = np.mean([df["num_inducing_points"] for df in gp_td_mpc_no_error_RBF], axis=0)
 
+ax2.plot(timesteps, gp_td_mpc_RBF_num_inducing_points, label="GP-TD-MPC (RBF)", color="red", marker="s")
+ax2.plot(timesteps, gp_td_mpc_matern_num_inducing_points, label="GP-TD-MPC (Matérn-3/2)", color="lime", marker="s")
+ax2.plot(timesteps, gp_td_mpc_dkl_RBF_num_inducing_points, label="GP-TD-MPC (DKL + RBF)", color="maroon", marker="v")
+ax2.plot(timesteps, gp_td_mpc_dkl_matern_num_inducing_points, label="GP-TD-MPC (DKL + Matérn-3/2)", color="green", marker="v")
+ax2.plot(timesteps, gp_td_mpc_dkl_SM_num_inducing_points, label="GP-TD-MPC (DKL + SM)", color="blue", marker="v")
+
+ax2.set_xlabel("Timesteps")
+ax2.set_ylabel("Number of Inducing Points")
+ax2.set_title("Inducing Points Comparison (Pendulum-v1)")
+
+# Adjust legend and show plot
+handles, labels = ax1.get_legend_handles_labels()
+fig.legend(handles, labels, loc='lower center', ncol=6)
 plt.show()
 
 # Compute total runtime and std
@@ -96,52 +118,29 @@ print(f"GP-TD-MPC (DKL + RBF): {gp_td_mpc_dkl_RBF_runtime:.2f} ± {gp_td_mpc_dkl
 print(f"GP-TD-MPC (DKL + Matérn-3/2): {gp_td_mpc_dkl_matern_runtime:.2f} ± {gp_td_mpc_dkl_matern_runtime_std:.2f}")
 print(f"GP-TD-MPC (DKL + SM): {gp_td_mpc_dkl_SM_runtime:.2f} ± {gp_td_mpc_dkl_SM_runtime_std:.2f}")
 
-# Plot number of inducing points changed over time
-gp_td_mpc_RBF_num_inducing_points = np.mean([df["num_inducing_points"] for df in gp_td_mpc_RBF], axis=0)
-gp_td_mpc_matern_num_inducing_points = np.mean([df["num_inducing_points"] for df in gp_td_mpc_matern], axis=0)
-gp_td_mpc_dkl_RBF_num_inducing_points = np.mean([df["num_inducing_points"] for df in gp_td_mpc_dkl_RBF], axis=0)
-gp_td_mpc_dkl_matern_num_inducing_points = np.mean([df["num_inducing_points"] for df in gp_td_mpc_dkl_matern], axis=0)
-gp_td_mpc_dkl_SM_num_inducing_points = np.mean([df["num_inducing_points"] for df in gp_td_mpc_dkl_SM], axis=0)
-gp_td_mpc_no_error_RBF_num_inducing_points = np.mean([df["num_inducing_points"] for df in gp_td_mpc_no_error_RBF], axis=0)
-
-fig, ax1 = plt.subplots(figsize=(10, 6))
-ax1.plot(timesteps, gp_td_mpc_RBF_num_inducing_points, label="GP-TD-MPC (RBF)", color="red", marker="s")
-ax1.plot(timesteps, gp_td_mpc_matern_num_inducing_points, label="GP-TD-MPC (Matérn-3/2)", color="lime", marker="s")
-ax1.plot(timesteps, gp_td_mpc_dkl_RBF_num_inducing_points, label="GP-TD-MPC (DKL + RBF)", color="maroon", marker="v")
-ax1.plot(timesteps, gp_td_mpc_dkl_matern_num_inducing_points, label="GP-TD-MPC (DKL + Matérn-3/2)", color="green", marker="v")
-ax1.plot(timesteps, gp_td_mpc_dkl_SM_num_inducing_points, label="GP-TD-MPC (DKL + SM)", color="blue", marker="v")
-
-ax1.set_xlabel("Timesteps")
-ax1.set_ylabel("Number of Inducing Points")
-ax1.set_title("Pendulum-v1")
-
-# legend
-ax1.legend()
-
-plt.show()
-
 # Ablation: compare GP-TD-MPC with and without learning error model
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
 
 fig.tight_layout(pad=5.0)
 
+ax1.plot(timesteps, td_mpc_mean, label="TD-MPC", color="black", marker="o")
 ax1.plot(timesteps, gp_td_mpc_RBF_mean, label="GP-TD-MPC (dynamics residual)", color="red", marker="s")
 ax1.plot(timesteps, gp_td_mpc_no_error_RBF_mean, label="GP-TD-MPC (ground-truth)", color="orange", marker="D")
 
 ax1.set_xlabel("Timesteps")
 ax1.set_ylabel("Total Reward")
-ax1.set_title("Performance Comparison")
+ax1.set_title("Performance Comparison (Pendulum-v1)")
 
 ax2.plot(timesteps, gp_td_mpc_RBF_num_inducing_points, label="GP-TD-MPC (residual)", color="red", marker="s")
 ax2.plot(timesteps, gp_td_mpc_no_error_RBF_num_inducing_points, label="GP-TD-MPC (ground-truth)", color="orange", marker="D")
 
 ax2.set_xlabel("Timesteps")
 ax2.set_ylabel("Number of Inducing Points")
-ax2.set_title("Inducing Points Comparison")
+ax2.set_title("Inducing Points Comparison (Pendulum-v1)")
 
 # title and legend (lower center below two subplots)
 handles, labels = ax1.get_legend_handles_labels()
-fig.legend(handles, labels, loc='lower center', ncol=2)
+fig.legend(handles, labels, loc='lower center', ncol=3)
 
 plt.show()
 
@@ -151,6 +150,11 @@ plt.show()
 """
 set CUBLAS_WORKSPACE_CONFIG=:16:8
 
+python train.py --seed 1 --kernel "NA"
+python train.py --seed 2 --kernel "NA"
+python train.py --seed 3 --kernel "NA"
+python train.py --seed 4 --kernel "NA"
+python train.py --seed 5 --kernel "NA"
 
 python train.py --seed 1 --kernel "RBF"
 python train.py --seed 2 --kernel "RBF"

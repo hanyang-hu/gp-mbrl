@@ -1,0 +1,11 @@
+digraph {
+	label="Single Hidden Layer MLP" labelloc=t rankdir=LR
+	input [label="Input Layer
+(input_dim)" shape=box]
+	hidden [label="Hidden Layer
+(hidden_dim)" shape=box]
+	output [label="Output Layer
+(output_dim)" shape=box]
+	input -> hidden
+	hidden -> output
+}
