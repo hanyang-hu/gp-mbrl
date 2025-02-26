@@ -1,0 +1,85 @@
+# environment
+task: "Swimmer-v5"
+exp_name: gp_td_mpc_dkl
+kernel: "SM" # if "NA", do not use GP
+res_dyna: False # Residual connection in the dynamics model
+save_path: "models/${task}/${exp_name}_${kernel}_${seed}.pt"
+modality: 'state'
+action_repeat: 2
+discount: 0.99
+episode_length: 1000/${action_repeat}
+val_episode_length: 1000/${action_repeat}
+train_steps: 30000/${action_repeat}
+seed_steps: 2000
+
+# misc
+reward_centering: False # Did not see improvement with reward centering on Pendulum-v1
+determinism: True # Remark. True if need to reproduce the results
+seed: 42
+eval: False
+eval_freq: 1000
+eval_episodes: 1
+render_eval: True # Remark. True if need to visualize evaluation and render in human mode
+save_video: false
+save_model: false
+
+# planning
+iterations: 6
+num_samples: 512
+num_elites: 64
+mixture_coef: 0.05
+min_std: 0.05
+temperature: 0.5
+momentum: 0.1
+
+# learning
+batch_size: 256
+max_buffer_size: 1000000
+horizon: 5
+reward_coef: 0.5
+value_coef: 0.1
+consistency_coef: 2
+rho: 0.5
+kappa: 0.1
+lr: 1e-3
+std_schedule: linear(0.5, ${min_std}, 10000)
+horizon_schedule: linear(1, ${horizon}, 50)
+per_alpha: 0.6
+per_beta: 0.4
+grad_clip_norm: 10
+update_freq: 1
+tau: 0.01
+rew_beta: 5e-4
+
+# gp-learning
+gp_update_num: 0
+gp_update_per_iter: 1
+gp_simul_subsample_size: 256 # number of samples used for joint training of gp and dynamics model
+gp_prior_subsample_size: 512 # number of samples used for gp prior learning (fine-tuning)
+snr_coef: 0.0
+gp_loss_coef: 1.0
+gp_learn_error: True # the gp hyperparameter training process considers dynamcis model error
+frozen_encoder: False # freeze the encoder during gp learning
+snr_tau: 10
+snr_p: 8
+
+# OVC/DKLOVC specific
+num_inducing_points: 1024 # maximum number of inducing points
+latent_gp_dim: 3 # latent dimension of each independent GP, if using DKL
+error_tol: 1e-6
+subsample_size: 4096 # points subsampled by FPS (O(NM)) before using pivoted cholesky (O(N^3))
+pivoted_cholesky: True
+fps: True # do not use FPS when the total amount of data is small
+use_DKL: True
+DKL_weiht_decay: False
+use_DSP: False
+
+# architecture
+enc_dim: 256
+mlp_dim: 256
+latent_dim: 5
+
+# wandb (insert your own)
+use_wandb: false
+wandb_project: none
+wandb_entity: none

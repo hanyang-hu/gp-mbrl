@@ -480,22 +480,52 @@ class GPTDMPC(TDMPC):
                 dm_targets = ground_truth.detach() # GP hyperparameters only considers the ground-truth, does not consider the original prediction error
             dm_targets = dm_targets.t()
 
-            # Compute GP loss
-            self.dynamics_gp.set_train_data(gp_inputs, dm_targets, strict=False)
-            gp_output = self.dynamics_gp(gp_inputs)
-            gp_loss = -self.dynamics_gp_mll(gp_output, dm_targets).mean()
+            try:
+                # Compute GP loss
+                gp_obs = self.memory["obs"][:self.current_step+1]
+                gp_act = self.memory["act"][:self.current_step+1]
+                gp_next_obs = self.memory["next_obs"][:self.current_step+1]
+                gp_rew = self.memory["rew"][:self.current_step+1]
+                memory_size = gp_obs.size(0)
 
-            # Compute signal-to-noise penalty (see https://github.com/EmbodiedVision/dlgpd/blob/master/dlgpd/models/gp.py)
-            tau, p = self.cfg.snr_tau, self.cfg.snr_p
-            output_scale = self.dynamics_gp.covar_module.outputscale ** 0.5
-            noise_variance = self.dynamics_gp.likelihood.noise_covar.noise.squeeze(-1) ** 0.5
-            snr = output_scale / noise_variance
-            snr_penalty = (torch.log(snr) / math.log(tau)).pow(p).sum()
-            gp_loss += self.cfg.snr_coef * snr_penalty
-            gp_loss *= self.cfg.gp_loss_coef
+                # Subsample data uniformly instead of from PER
+                subsample_size = min(memory_size, self.cfg.gp_simul_subsample_size)
+                gp_idxs = torch.randperm(memory_size)[:subsample_size]
+                gp_obs, gp_act, gp_next_obs, gp_rew = gp_obs[gp_idxs], gp_act[gp_idxs], gp_next_obs[gp_idxs], gp_rew[gp_idxs]
+
+                # Compute inputs and targets
+                gp_z = gp_obs.clone().detach()
+                gp_next_z = gp_next_obs.clone().detach()
+                gp_inputs = torch.cat([gp_z, gp_act], dim=-1)
+                ground_truth = torch.concatenate([gp_next_z, gp_rew], dim=-1).detach()
+
+                if self.cfg.gp_learn_error: 
+                    z_pred, r_pred = self.next(gp_z, gp_act) # prediction from the original dynamics model
+                    pred = torch.concatenate([z_pred, r_pred], dim=-1)
+                    dm_targets = (ground_truth - pred).detach()
+                else:
+                    dm_targets = ground_truth.detach() # GP hyperparameters only considers the ground-truth, does not consider the original prediction error
+                dm_targets = dm_targets.t()
+
+                # Compute GP loss
+                self.dynamics_gp.set_train_data(gp_inputs, dm_targets, strict=False)
+                gp_output = self.dynamics_gp(gp_inputs)
+                gp_loss = -self.dynamics_gp_mll(gp_output, dm_targets).mean()
+
+                # Compute signal-to-noise penalty (see https://github.com/EmbodiedVision/dlgpd/blob/master/dlgpd/models/gp.py)
+                tau, p = self.cfg.snr_tau, self.cfg.snr_p
+                output_scale = self.dynamics_gp.covar_module.outputscale ** 0.5
+                noise_variance = self.dynamics_gp.likelihood.noise_covar.noise.squeeze(-1) ** 0.5
+                snr = output_scale / noise_variance
+                snr_penalty = (torch.log(snr) / math.log(tau)).pow(p).sum()
+                gp_loss += self.cfg.snr_coef * snr_penalty
+                gp_loss *= self.cfg.gp_loss_coef
+
+                gp_loss.backward()
+            except:
+                gp_loss = None
 
             weighted_loss.backward()
-            gp_loss.backward()
 
             # Clip gradients
             # torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
@@ -524,7 +554,7 @@ class GPTDMPC(TDMPC):
                 'pi_loss': pi_loss,
                 'total_loss': float(total_loss.mean().item()),
                 'weighted_loss': float(weighted_loss.mean().item()),
-                'gp_loss': gp_loss.item()
+                'gp_loss': gp_loss.item() if (gp_loss is not None) else float('inf')
             }
 
     def update_gp_prior(self):
@@ -594,13 +624,21 @@ class GPTDMPC(TDMPC):
         inputs = torch.cat([z, act], dim=-1)
         ground_truth = torch.cat([next_z, rew], dim=-1)
         pred = torch.cat([z_pred, r_pred], dim=-1)
-        dm_targets = ground_truth - pred # GP updates the prediction error of the original dynamics model
+        if not hasattr(self.cfg, 'use_dm_MLP') or self.cfg.use_dm_MLP:
+            dm_targets = ground_truth - pred # GP updates the prediction error of the original dynamics model
+        else:
+            print("Using ground truth instead of residual dynamics from the MLP models.")
+            dm_targets = ground_truth
         dm_targets = dm_targets.t()
 
         # Set train data and compute cache
-        with linear_operator.settings.cholesky_jitter(1e-2):
-            self.dynamics_gp.clear_cache(inputs, dm_targets)  
-            print("Dynamics GP Rank: ", self.dynamics_gp.m_u.shape)
+        try:
+            with linear_operator.settings.cholesky_jitter(1e-2):
+                self.dynamics_gp.clear_cache(inputs, dm_targets)  
+                print("Dynamics GP Rank: ", self.dynamics_gp.m_u.shape)
+        except:
+            print("Numerical issue raised during cache update. Not using cache in this episode.")
+            self.cache = False
 
     @torch.no_grad()
     def correction(self, obs, act, rew, next_obs, step):
@@ -617,6 +655,9 @@ class GPTDMPC(TDMPC):
         # gp orrections
         dm_corr = self.dynamics_gp.mean_inference(torch.cat([z, a], dim=-1)).t()
         z_corr, r_corr = dm_corr[:, :-1], dm_corr[:, -1:]
+
+        if hasattr(self.cfg, 'use_dm_MLP') and not self.cfg.use_dm_MLP:
+            return z_corr, r_corr
 
         return z_pred + z_corr, r_pred + r_corr
 
