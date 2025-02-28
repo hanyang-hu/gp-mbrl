@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import gpytorch
+from linear_operator.utils.interpolation import left_interp
 from torch import distributions as pyd
 import math
 from torch.distributions.utils import _standard_normal
@@ -291,7 +292,6 @@ class DKLOVC(gpytorch.models.ExactGP):
             self.w = torch.nn.Parameter(w, requires_grad=False)
             self.pseudo_inputs = pseudo_inputs
 
-
     @torch.no_grad()
     def mean_inference(self, x):
         if self.use_DKL:
@@ -315,6 +315,109 @@ class DKLOVC(gpytorch.models.ExactGP):
         covar = self.covar_module(x)
         return gpytorch.distributions.MultivariateNormal(mean, covar)  
     
+
+class KISSGP(gpytorch.models.ExactGP):
+    def __init__(self, output_dim, grid_bounds=[(-1., 1.), (-1., 1.)], grid_size=16, likelihood=None):
+        super(KISSGP, self).__init__(
+            train_inputs=torch.zeros(output_dim, 10, 2),
+            train_targets=torch.zeros(output_dim, 10),
+            likelihood=likelihood
+        )
+
+        self.mean_module = gpytorch.means.ConstantMean(batch_shape=torch.Size([output_dim]))
+        self.covar_module = gpytorch.kernels.GridInterpolationKernel(
+            gpytorch.kernels.ScaleKernel(
+                gpytorch.kernels.RBFKernel(
+                    ard_num_dims=2,
+                    batch_shape=torch.Size([output_dim]),
+                    # num_mixtures=4,
+                ),
+                batch_shape=torch.Size([output_dim]),
+            ),
+            num_dims=2,
+            grid_bounds=grid_bounds,
+            grid_size=grid_size,
+        )
+
+    def forward(self, x):
+        mean = self.mean_module(x)
+        covar = self.covar_module(x)
+        return gpytorch.distributions.MultivariateNormal(mean, covar)
+
+
+class DKLSKI(torch.nn.Module):
+    """
+    SKI with DKL for constant-time GP inference.
+    """
+    def __init__(
+            self, input_dim, hidden_dim, output_dim, likelihood=None, 
+            num_inducing_points=256, latent_gp_dim=2, grid_bound=(-1., 1.)
+        ):
+        super(DKLSKI, self).__init__()
+
+        assert num_inducing_points == 256, "Currently, SKI only supports 256 inducing points."
+        assert latent_gp_dim == 2, "Currently, SKI only supports 2 latent GP dimensions."
+
+        self.input_dim = input_dim
+        self.ski_dim = latent_gp_dim
+        self.output_dim = output_dim
+
+        self.feature_extractor = FeatureExtractor(input_dim, hidden_dim, output_dim * self.ski_dim)
+
+        grid_bounds = [grid_bound,] * self.ski_dim
+        self.grid_bounds = grid_bounds
+        self.scale_to_bounds = gpytorch.utils.grid.ScaleToBounds(grid_bound[0], grid_bound[1])
+
+        self.mean_module = gpytorch.means.ConstantMean(batch_shape=torch.Size([output_dim]))
+
+        self.gp_layer = KISSGP(
+            output_dim=output_dim, 
+            grid_bounds=grid_bounds, 
+            likelihood=likelihood
+        )
+
+        self.apply(orthogonal_init)
+
+    # @torch.no_grad()
+    # def clear_cache(self, train_inputs, train_targets):
+    #     if not self.eval():
+    #         raise RuntimeError("Model must be in eval mode to update cache.")
+
+    #     x = self.feature_extractor(train_inputs).t()
+    #     x = x.reshape(self.output_dim, self.ski_dim, -1).permute(0, 2, 1)
+    #     x = self.scale_to_bounds(x)
+        
+    #     self.set_train_data(x, train_targets, strict=False)
+    #     output = self.forward(train_inputs) # warm-up
+
+    def forward(self, x):
+        """
+        Input shape: (input_dim, batch_shape)
+        Output mean shape: (output_dim, batch_shape)
+        """
+        x = self.feature_extractor(x.t()).t()
+        x = x.reshape(self.output_dim, self.ski_dim, -1).permute(0, 2, 1)
+        x = self.scale_to_bounds(x)
+        return self.gp_layer(x)
+    
+    def mean_inference(self, x):
+        x = self.feature_extractor(x).t()
+        x = x.reshape(self.output_dim, self.ski_dim, -1).permute(0, 2, 1)
+        x = self.scale_to_bounds(x)
+
+        # Compute mean
+        test_mean = self.gp_layer.mean_module(x)
+
+        # Fetch WISKI mean cache, do inference
+        if self.gp_layer.prediction_strategy:
+            mean_cache = self.gp_layer.prediction_strategy.fantasy_mean_cache
+            test_interp_indices, test_interp_values = self.gp_layer.covar_module._compute_grid(x)
+
+            return test_mean + left_interp(test_interp_indices, test_interp_values, mean_cache).squeeze(-1)
+        else:
+            print("Did not find prediction strategy, use the default prediction.")
+            return None
+
 
 class QNet(nn.Module):
     """Q-network with LayerNorm"""

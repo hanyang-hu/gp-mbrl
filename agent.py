@@ -673,3 +673,257 @@ class GPTDMPC(TDMPC):
             discount *= self.cfg.discount
         G += discount * self.Q(z, self.pi(z, self.cfg.min_std)) # terminal value
         return G
+    
+
+class GPTDMPC_SKI(GPTDMPC):
+    def __init__(self, cfg):
+        super(GPTDMPC, self).__init__(cfg) # call the grandparent class constructor
+
+        # Deep Dynamics Kernel
+        self.dynamics_likelihood = gpytorch.likelihoods.GaussianLikelihood(batch_shape=torch.Size([cfg.obs_dim+1])).to(self.device)
+        self.dynamics_gp = utils.DKLSKI(
+            cfg.obs_dim + cfg.action_dim, cfg.mlp_dim, cfg.obs_dim+1,
+            likelihood=self.dynamics_likelihood, 
+            num_inducing_points=cfg.num_inducing_points,
+            latent_gp_dim=cfg.latent_gp_dim, 
+        ).to(self.device)
+        self.dynamics_gp_mll = gpytorch.mlls.ExactMarginalLogLikelihood(
+            self.dynamics_gp.gp_layer.likelihood, 
+            self.dynamics_gp.gp_layer
+        )
+
+        assert cfg.use_DKL, "SKI only supports DKL for now."
+
+        self.gp_optim = torch.optim.Adam(
+            [
+                {'params': self.dynamics_gp.feature_extractor.parameters(), 'weight_decay': 1e-4 if cfg.DKL_weiht_decay else 0},
+                {'params': self.dynamics_gp.gp_layer.mean_module.parameters()},
+                {'params': self.dynamics_gp.gp_layer.covar_module.parameters(), 'lr': cfg.lr},
+                {'params': self.dynamics_likelihood.parameters(), 'lr': cfg.lr},
+            ],
+            lr=self.cfg.lr
+        )
+
+        # Turn to eval
+        self.dynamics_gp.eval()
+        self.dynamics_likelihood.eval()
+
+        self.cache = False
+
+    @torch.no_grad()
+    def compute_cache(self):
+        print("Computing cache...")
+        self.cache = True 
+
+        # Fetch data from memory
+        window_size = self.current_step+1 # all data in the memory
+        obs = self.memory["obs"][max(0, self.current_step+1-window_size):self.current_step+1]
+        act = self.memory["act"][max(0, self.current_step+1-window_size):self.current_step+1]
+        next_obs = self.memory["next_obs"][max(0, self.current_step+1-window_size):self.current_step+1]
+        rew = self.memory["rew"][max(0, self.current_step+1-window_size):self.current_step+1]
+
+        # Compute input and targets
+        z = obs.clone()
+        next_z = next_obs.clone()
+        z_pred, r_pred = self.next(z, act)
+        inputs = torch.cat([z, act], dim=-1)
+        ground_truth = torch.cat([next_z, rew], dim=-1)
+        pred = torch.cat([z_pred, r_pred], dim=-1)
+        if not hasattr(self.cfg, 'use_dm_MLP') or self.cfg.use_dm_MLP:
+            dm_targets = ground_truth - pred # GP updates the prediction error of the original dynamics model
+        else:
+            print("Using ground truth instead of residual dynamics from the MLP models.")
+            dm_targets = ground_truth
+        dm_targets = dm_targets.t()
+
+        # Set train data and compute cache
+        dm_gp_inputs = self.dynamics_gp.feature_extractor(inputs).t()
+        dm_gp_inputs = dm_gp_inputs.reshape(self.cfg.obs_dim+1, 2, -1).permute(0, 2, 1)
+        dm_gp_inputs = self.dynamics_gp.scale_to_bounds(dm_gp_inputs)
+
+        self.dynamics_gp.gp_layer.set_train_data(dm_gp_inputs, dm_targets, strict=False)
+        output = self.dynamics_gp.gp_layer(dm_gp_inputs).mean # warm up the model
+
+        # # Set train data and compute cache
+        # try:
+        #     with linear_operator.settings.cholesky_jitter(1e-2):
+        #         self.dynamics_gp.clear_cache(inputs, dm_targets)  
+        #         # print("Dynamics GP Rank: ", self.dynamics_gp.m_u.shape)
+        # except:
+        #     print("Numerical issue raised during cache update. Not using cache in this episode.")
+        #     self.cache = False
+
+    @torch.no_grad()
+    def corrected_next(self, z, a):
+        # original predictions
+        z_pred, r_pred = self.next(z, a)
+
+        if not self.cache:
+            return z_pred, r_pred
+
+        # gp orrections
+        dm_corr = self.dynamics_gp.mean_inference(torch.cat([z, a], dim=-1))
+        if dm_corr is not None:
+            dm_corr = dm_corr.t()
+        else:
+            return z_pred, r_pred
+        z_corr, r_corr = dm_corr[:, :-1], dm_corr[:, -1:]
+
+        if hasattr(self.cfg, 'use_dm_MLP') and not self.cfg.use_dm_MLP:
+            return z_corr, r_corr
+
+        return z_pred + z_corr, r_pred + r_corr
+    
+    def update(self, replay_buffer, step):
+        with torch.autograd.set_detect_anomaly(False):
+            obs, next_obses, action, reward, idxs, weights = replay_buffer.sample()
+
+            # Reset action to a leaf node
+            action = action.detach()
+
+            # Centering reward signals
+            if self.cfg.reward_centering:
+                centered_reward = reward - self.rew_ctr
+            else:
+                centered_reward = reward
+
+            self.optim.zero_grad(set_to_none=True)
+            self.gp_optim.zero_grad(set_to_none=True)
+            self.std = utils.linear_schedule(self.cfg.std_schedule, step)
+            
+            # Turn to train
+            self.to_train()
+
+            # Do not encode representation
+            z = [None] * (self.cfg.horizon + 1)
+            # z[0] = self.encoder(obs)
+            z[0] = obs.clone()
+
+            batch_size = obs.size(0)
+            consistency_loss, reward_loss, value_loss, priority_loss = (torch.zeros(batch_size, device=obs.device),) * 4
+            
+            for t in range(self.cfg.horizon):
+                # Predictions
+                Q1, Q2 = self.q1_net(z[t], action[t]), self.q2_net(z[t], action[t])
+                z[t+1], reward_pred = self.next(z[t], action[t]) # z[t+1] is the prediction
+
+                next_obs = next_obses[t]
+                # next_z = self.encoder_target(next_obs).detach() 
+                next_z = next_obs.clone().detach() # no encoding (supposedly from target encoder)
+                td_target = self._td_target(next_obs, centered_reward[t]).detach()
+
+                # Losses
+                rho = (self.cfg.rho ** t)
+                consistency_loss += rho * torch.mean(utils.mse(z[t+1], next_z), dim=1)
+                reward_loss += rho * utils.mse(reward_pred, centered_reward[t]).squeeze(1)
+                value_loss += rho * (utils.mse(Q1, td_target) + utils.mse(Q2, td_target)).squeeze(1)
+                priority_loss += rho * (utils.l1(Q1, td_target) + utils.l1(Q2, td_target)).squeeze(1)
+
+            # Compute TD-MPC loss
+            total_loss = self.cfg.consistency_coef * consistency_loss.clamp(max=1e4) + \
+                        self.cfg.reward_coef * reward_loss.clamp(max=1e4) + \
+                        self.cfg.value_coef * value_loss.clamp(max=1e4)
+
+            weighted_loss = (total_loss * weights).mean()
+            weighted_loss.register_hook(lambda grad: grad * (1/self.cfg.horizon)) 
+
+            # Compute GP loss
+            gp_obs = self.memory["obs"][:self.current_step+1]
+            gp_act = self.memory["act"][:self.current_step+1]
+            gp_next_obs = self.memory["next_obs"][:self.current_step+1]
+            gp_rew = self.memory["rew"][:self.current_step+1]
+            memory_size = gp_obs.size(0)
+
+            # Subsample data uniformly instead of from PER
+            subsample_size = min(memory_size, self.cfg.gp_simul_subsample_size)
+            gp_idxs = torch.randperm(memory_size)[:subsample_size]
+            gp_obs, gp_act, gp_next_obs, gp_rew = gp_obs[gp_idxs], gp_act[gp_idxs], gp_next_obs[gp_idxs], gp_rew[gp_idxs]
+
+            # Compute inputs and targets
+            gp_z = gp_obs.clone().detach()
+            gp_next_z = gp_next_obs.clone().detach()
+            gp_inputs = torch.cat([gp_z, gp_act], dim=-1)
+            ground_truth = torch.concatenate([gp_next_z, gp_rew], dim=-1).detach()
+
+            if self.cfg.gp_learn_error: 
+                z_pred, r_pred = self.next(gp_z, gp_act) # prediction from the original dynamics model
+                pred = torch.concatenate([z_pred, r_pred], dim=-1)
+                dm_targets = (ground_truth - pred).detach()
+            else:
+                dm_targets = ground_truth.detach() # GP hyperparameters only considers the ground-truth, does not consider the original prediction error
+            dm_targets = dm_targets.t()
+
+            # Compute GP loss
+            gp_obs = self.memory["obs"][:self.current_step+1]
+            gp_act = self.memory["act"][:self.current_step+1]
+            gp_next_obs = self.memory["next_obs"][:self.current_step+1]
+            gp_rew = self.memory["rew"][:self.current_step+1]
+            memory_size = gp_obs.size(0)
+
+            # Subsample data uniformly instead of from PER
+            subsample_size = min(memory_size, self.cfg.gp_simul_subsample_size)
+            gp_idxs = torch.randperm(memory_size)[:subsample_size]
+            gp_obs, gp_act, gp_next_obs, gp_rew = gp_obs[gp_idxs], gp_act[gp_idxs], gp_next_obs[gp_idxs], gp_rew[gp_idxs]
+
+            # Compute inputs and targets
+            gp_z = gp_obs.clone().detach()
+            gp_next_z = gp_next_obs.clone().detach()
+            gp_inputs = torch.cat([gp_z, gp_act], dim=-1)
+            ground_truth = torch.concatenate([gp_next_z, gp_rew], dim=-1).detach()
+
+            if self.cfg.gp_learn_error: 
+                z_pred, r_pred = self.next(gp_z, gp_act) # prediction from the original dynamics model
+                pred = torch.concatenate([z_pred, r_pred], dim=-1)
+                dm_targets = (ground_truth - pred).detach()
+            else:
+                dm_targets = ground_truth.detach() # GP hyperparameters only considers the ground-truth, does not consider the original prediction error
+            dm_targets = dm_targets.t()
+
+            try:
+                # Set train data
+                # self.dynamics_gp.set_train_data(gp_inputs, dm_targets, strict=False)
+                dm_gp_inputs = self.dynamics_gp.feature_extractor(gp_inputs).t()
+                dm_gp_inputs = dm_gp_inputs.reshape(self.cfg.obs_dim+1, 2, -1).permute(0, 2, 1)
+                dm_gp_inputs = self.dynamics_gp.scale_to_bounds(dm_gp_inputs)
+
+                self.dynamics_gp.gp_layer.set_train_data(dm_gp_inputs, dm_targets, strict=False)
+
+                # Compute GP loss
+                gp_output = self.dynamics_gp.gp_layer(dm_gp_inputs)
+                gp_loss = -self.dynamics_gp_mll(gp_output, dm_targets).mean()
+
+                gp_loss.backward()
+            except:
+                gp_loss = None
+
+            weighted_loss.backward()
+
+            # Clip gradients
+            # torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
+            torch.nn.utils.clip_grad_norm_(self.dynamics_model.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
+            torch.nn.utils.clip_grad_norm_(self.q1_net.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
+            torch.nn.utils.clip_grad_norm_(self.q2_net.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
+            torch.nn.utils.clip_grad_norm_(self.rew_fn.parameters(), self.cfg.grad_clip_norm, error_if_nonfinite=False)
+
+            self.optim.step()
+            self.gp_optim.step()
+            
+            replay_buffer.update_priorities(idxs, priority_loss.clamp(max=1e4).detach())
+
+            # Update policy + target network
+            pi_loss = self.update_pi([z_t.detach() for z_t in z])
+            if step % self.cfg.update_freq == 0:
+                self.ema(self.cfg.tau)
+
+            # Turn to eval
+            self.to_eval()
+
+            return {
+                'consistency_loss': float(consistency_loss.mean().item()),
+                'reward_loss': float(reward_loss.mean().item()),
+                'value_loss': float(value_loss.mean().item()),
+                'pi_loss': pi_loss,
+                'total_loss': float(total_loss.mean().item()),
+                'weighted_loss': float(weighted_loss.mean().item()),
+                'gp_loss': gp_loss.item() if (gp_loss is not None) else float('inf')
+            }

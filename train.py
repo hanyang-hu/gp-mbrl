@@ -12,7 +12,7 @@ import tqdm
 import warnings
 import copy
 
-from agent import TDMPC, GPTDMPC
+from agent import TDMPC, GPTDMPC, GPTDMPC_SKI
 from utils import Episode, ReplayBuffer
 
 
@@ -73,7 +73,13 @@ def train(cfg_path = "./configs/default.yaml", seed=None, kernel=None):
     cfg.action_lower_bound = (env.action_space.low).tolist()
     cfg.action_upper_bound = (env.action_space.high).tolist()
 
-    agent = TDMPC(cfg) if cfg.kernel == "NA" else GPTDMPC(cfg)
+    # agent = TDMPC(cfg) if (cfg.kernel == "NA") else GPTDMPC(cfg)
+    if cfg.kernel == "NA":
+        agent = TDMPC(cfg)
+    elif cfg.kernel == "SKI":
+        agent = GPTDMPC_SKI(cfg)
+    else:
+        agent = GPTDMPC(cfg)
     buffer = ReplayBuffer(cfg)
 
     # Run training (adapted from https://github.com/nicklashansen/tdmpc/)
@@ -120,7 +126,7 @@ def train(cfg_path = "./configs/default.yaml", seed=None, kernel=None):
                     "GP Loss": loss["gp_loss"] if "gp_loss" in loss else float("nan"),
                 }
                 progress_bar.set_postfix(post_dict)
-            if isinstance(agent, GPTDMPC):
+            if isinstance(agent, GPTDMPC) or isinstance(agent, GPTDMPC_SKI):
                 # Update kernel hyperparameters
                 progress_bar = tqdm.tqdm(range(cfg.gp_update_num), desc=f"Episode {episode_idx} (Prior Update)")
                 for _ in progress_bar:
@@ -143,7 +149,7 @@ def train(cfg_path = "./configs/default.yaml", seed=None, kernel=None):
             'env_step': env_step,
             'total_time': time.time() - start_time,
             'episode_reward': episode.cumulative_reward,
-            'num_inducing_points': agent.dynamics_gp.m_u.shape[-1] if (cfg.kernel != "NA" and agent.cache) else 0,
+            'num_inducing_points': agent.dynamics_gp.m_u.shape[-1] if ((cfg.kernel not in {"NA", "SKI"}) and agent.cache) else 0,
         }
         update_metric(train_metrics, common_metrics)
         try:
@@ -164,7 +170,7 @@ def train(cfg_path = "./configs/default.yaml", seed=None, kernel=None):
     print('Training completed successfully')
 
     # Save model
-    if cfg.save_path:
+    if False and cfg.save_path:
         os.makedirs(os.path.dirname(cfg.save_path), exist_ok=True)
         agent.save(cfg.save_path)
         print(f'Model saved to {cfg.save_path}')

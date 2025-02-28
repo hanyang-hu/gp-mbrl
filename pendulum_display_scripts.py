@@ -24,8 +24,8 @@ gp_td_mpc_dkl_matern_filenames = [f"{task}/metrics_{exp_name}_{kernel}_{seed}.cs
 exp_name, kernel = "gp_td_mpc_dkl", "SM"
 gp_td_mpc_SM_filenames = [f"{task}/metrics_{exp_name}_{kernel}_{seed}.csv" for seed in range(1, 6)]
 
-exp_name, kernel = "gp_td_mpc_no_error", "RBF"
-gp_td_mpc_no_error_RBF_filenames = [f"{task}/metrics_{exp_name}_{kernel}_{seed}.csv" for seed in range(1, 6)]
+# exp_name, kernel = "gp_td_mpc_no_error", "RBF"
+# gp_td_mpc_no_error_RBF_filenames = [f"{task}/metrics_{exp_name}_{kernel}_{seed}.csv" for seed in range(1, 6)]
 
 # exp_name, kernel = "gp_td_mpc_no_dm_MLP_512", "RBF"
 # gp_td_mpc_no_dm_MLP_RBF_filenames = [f"{task}/metrics_{exp_name}_{kernel}_{seed}.csv" for seed in range(1, 6)]
@@ -37,7 +37,7 @@ gp_td_mpc_matern = [pd.read_csv(root_dir + filename) for filename in gp_td_mpc_m
 gp_td_mpc_dkl_RBF = [pd.read_csv(root_dir + filename) for filename in gp_td_mpc_dkl_RBF_filenames]
 gp_td_mpc_dkl_matern = [pd.read_csv(root_dir + filename) for filename in gp_td_mpc_dkl_matern_filenames]
 gp_td_mpc_dkl_SM = [pd.read_csv(root_dir + filename) for filename in gp_td_mpc_SM_filenames]
-gp_td_mpc_no_error_RBF = [pd.read_csv(root_dir + filename) for filename in gp_td_mpc_no_error_RBF_filenames]
+# gp_td_mpc_no_error_RBF = [pd.read_csv(root_dir + filename) for filename in gp_td_mpc_no_error_RBF_filenames]
 # gp_td_mpc_no_dm_MLP_RBF = [pd.read_csv(root_dir + filename) for filename in gp_td_mpc_no_dm_MLP_RBF_filenames]
 
 # Truncate the first few random rollouts
@@ -47,7 +47,7 @@ gp_td_mpc_matern = [df.iloc[4:] for df in gp_td_mpc_matern]
 gp_td_mpc_dkl_RBF = [df.iloc[4:] for df in gp_td_mpc_dkl_RBF]
 gp_td_mpc_dkl_matern = [df.iloc[4:] for df in gp_td_mpc_dkl_matern]
 gp_td_mpc_dkl_SM = [df.iloc[4:] for df in gp_td_mpc_dkl_SM]
-gp_td_mpc_no_error_RBF = [df.iloc[4:] for df in gp_td_mpc_no_error_RBF]
+# gp_td_mpc_no_error_RBF = [df.iloc[4:] for df in gp_td_mpc_no_error_RBF]
 # gp_td_mpc_no_dm_MLP_RBF = [df.iloc[4:] for df in gp_td_mpc_no_dm_MLP_RBF]
 
 # compute mean of the episode rewards
@@ -57,8 +57,8 @@ gp_td_mpc_matern_mean = np.mean([df["episode_reward"].cummax() for df in gp_td_m
 gp_td_mpc_dkl_RBF_mean = np.mean([df["episode_reward"].cummax() for df in gp_td_mpc_dkl_RBF], axis=0)
 gp_td_mpc_dkl_matern_mean = np.mean([df["episode_reward"].cummax() for df in gp_td_mpc_dkl_matern], axis=0)
 gp_td_mpc_dkl_SM_mean = np.mean([df["episode_reward"].cummax() for df in gp_td_mpc_dkl_SM], axis=0)
-gp_td_mpc_no_error_RBF_mean = np.mean([df["episode_reward"].cummax() for df in gp_td_mpc_no_error_RBF], axis=0)
-# gp_td_mpc_no_dm_MLP_RBF_mean = np.mean([df["episode_reward"] for df in gp_td_mpc_no_dm_MLP_RBF], axis=0)
+# gp_td_mpc_no_error_RBF_mean = np.mean([df["episode_reward"].cummax() for df in gp_td_mpc_no_error_RBF], axis=0)
+# gp_td_mpc_no_dm_MLP_RBF_mean = np.mean([df["episode_reward"].cummax() for df in gp_td_mpc_no_dm_MLP_RBF], axis=0)
 
 timesteps = td_mpc[0]["env_step"]
 
@@ -88,7 +88,7 @@ gp_td_mpc_matern_num_inducing_points = np.mean([df["num_inducing_points"] for df
 gp_td_mpc_dkl_RBF_num_inducing_points = np.mean([df["num_inducing_points"] for df in gp_td_mpc_dkl_RBF], axis=0)
 gp_td_mpc_dkl_matern_num_inducing_points = np.mean([df["num_inducing_points"] for df in gp_td_mpc_dkl_matern], axis=0)
 gp_td_mpc_dkl_SM_num_inducing_points = np.mean([df["num_inducing_points"] for df in gp_td_mpc_dkl_SM], axis=0)
-gp_td_mpc_no_error_RBF_num_inducing_points = np.mean([df["num_inducing_points"] for df in gp_td_mpc_no_error_RBF], axis=0)
+# gp_td_mpc_no_error_RBF_num_inducing_points = np.mean([df["num_inducing_points"] for df in gp_td_mpc_no_error_RBF], axis=0)
 # gp_td_mpc_no_dm_MLP_RBF_num_inducing_points = np.mean([df["num_inducing_points"] for df in gp_td_mpc_no_dm_MLP_RBF], axis=0)
 
 ax2.plot(timesteps, gp_td_mpc_RBF_num_inducing_points, label="GP-TD-MPC (RBF)", color="red", marker="s")
@@ -136,7 +136,7 @@ fig.tight_layout(pad=5.0)
 ax1.plot(timesteps, td_mpc_mean, label="TD-MPC", color="black", marker="o")
 ax1.plot(timesteps, gp_td_mpc_RBF_mean, label="GP-TD-MPC (residual target)", color="red", marker="s")
 ax1.plot(timesteps, gp_td_mpc_no_error_RBF_mean, label="GP-TD-MPC (ground-truth target)", color="orange", marker="D")
-# ax1.plot(timesteps, gp_td_mpc_no_dm_MLP_RBF_mean, label="GP-TD-MPC (w/o MLP model)", color="brown", marker="^")
+ax1.plot(timesteps, gp_td_mpc_no_dm_MLP_RBF_mean, label="GP-TD-MPC (w/o MLP model)", color="brown", marker="^")
 
 ax1.set_xlabel("Timesteps")
 ax1.set_ylabel("Total Reward")
@@ -144,7 +144,7 @@ ax1.set_title("Performance Comparison (Pendulum-v1)")
 
 ax2.plot(timesteps, gp_td_mpc_RBF_num_inducing_points, label="GP-TD-MPC (residual target)", color="red", marker="s")
 ax2.plot(timesteps, gp_td_mpc_no_error_RBF_num_inducing_points, label="GP-TD-MPC (ground-truth target)", color="orange", marker="D")
-# ax2.plot(timesteps, gp_td_mpc_no_dm_MLP_RBF_num_inducing_points, label="GP-TD-MPC (w/o MLP model)", color="brown", marker="^")
+ax2.plot(timesteps, gp_td_mpc_no_dm_MLP_RBF_num_inducing_points, label="GP-TD-MPC (w/o MLP model)", color="brown", marker="^")
 
 ax2.set_xlabel("Timesteps")
 ax2.set_ylabel("Number of Inducing Points")
@@ -161,12 +161,6 @@ plt.show()
 
 """
 set CUBLAS_WORKSPACE_CONFIG=:16:8
-
-python train.py --seed 1 --kernel "NA"
-python train.py --seed 2 --kernel "NA"
-python train.py --seed 3 --kernel "NA"
-python train.py --seed 4 --kernel "NA"
-python train.py --seed 5 --kernel "NA"
 
 python train.py --seed 1 --kernel "RBF"
 python train.py --seed 2 --kernel "RBF"
@@ -215,6 +209,31 @@ python train.py --seed 2 --kernel "RBF" --cfg_path "./configs/pendulum_no_dm_MLP
 python train.py --seed 3 --kernel "RBF" --cfg_path "./configs/pendulum_no_dm_MLP_512.yaml"
 python train.py --seed 4 --kernel "RBF" --cfg_path "./configs/pendulum_no_dm_MLP_512.yaml"
 python train.py --seed 5 --kernel "RBF" --cfg_path "./configs/pendulum_no_dm_MLP_512.yaml"
+
+python train.py --seed 1 --cfg_path "./configs/pendulum_dkl_ski.yaml"
+python train.py --seed 2 --cfg_path "./configs/pendulum_dkl_ski.yaml"
+python train.py --seed 3 --cfg_path "./configs/pendulum_dkl_ski.yaml"
+python train.py --seed 4 --cfg_path "./configs/pendulum_dkl_ski.yaml"
+python train.py --seed 5 --cfg_path "./configs/pendulum_dkl_ski.yaml"
+
+python train.py --seed 1 --kernel "RBF" --cfg_path "./configs/pendulum_dkl_2d.yaml"
+python train.py --seed 2 --kernel "RBF" --cfg_path "./configs/pendulum_dkl_2d.yaml"
+python train.py --seed 3 --kernel "RBF" --cfg_path "./configs/pendulum_dkl_2d.yaml"
+python train.py --seed 4 --kernel "RBF" --cfg_path "./configs/pendulum_dkl_2d.yaml"
+python train.py --seed 5 --kernel "RBF" --cfg_path "./configs/pendulum_dkl_2d.yaml"
+
+python train.py --seed 1 --kernel "RBF" --cfg_path "./configs/pendulum_dkl_fps.yaml"
+python train.py --seed 2 --kernel "RBF" --cfg_path "./configs/pendulum_dkl_fps.yaml"
+python train.py --seed 3 --kernel "RBF" --cfg_path "./configs/pendulum_dkl_fps.yaml"
+python train.py --seed 4 --kernel "RBF" --cfg_path "./configs/pendulum_dkl_fps.yaml"
+python train.py --seed 5 --kernel "RBF" --cfg_path "./configs/pendulum_dkl_fps.yaml"
+
+python train.py --seed 1 --kernel "NA"
+python train.py --seed 2 --kernel "NA"
+python train.py --seed 3 --kernel "NA"
+python train.py --seed 4 --kernel "NA"
+python train.py --seed 5 --kernel "NA"
+
 
 
 """

@@ -37,7 +37,7 @@ gp_td_mpc_dkl_matern = [pd.read_csv(root_dir + filename) for filename in gp_td_m
 gp_td_mpc_dkl_SM = [pd.read_csv(root_dir + filename) for filename in gp_td_mpc_dkl_SM_filenames]
 
 # Truncate the first few random rollouts
-num_random_rollouts = 2
+num_random_rollouts = 4
 td_mpc = [df.iloc[num_random_rollouts:] for df in td_mpc]
 gp_td_mpc_RBF = [df.iloc[num_random_rollouts:] for df in gp_td_mpc_RBF]
 # gp_td_mpc_dsp_RBF = [df.iloc[num_random_rollouts:] for df in gp_td_mpc_dsp_RBF]
@@ -47,15 +47,19 @@ gp_td_mpc_dkl_matern = [df.iloc[num_random_rollouts:] for df in gp_td_mpc_dkl_ma
 gp_td_mpc_dkl_SM = [df.iloc[num_random_rollouts:] for df in gp_td_mpc_dkl_SM]
 
 # compute mean of the episode rewards
-td_mpc_mean = np.mean([df["episode_reward"] for df in td_mpc], axis=0)
-gp_td_mpc_RBF_mean = np.mean([df["episode_reward"] for df in gp_td_mpc_RBF], axis=0)
-# gp_td_mpc_dsp_RBF_mean = np.mean([df["episode_reward"] for df in gp_td_mpc_dsp_RBF], axis=0)
-gp_td_mpc_matern_mean = np.mean([df["episode_reward"] for df in gp_td_mpc_matern], axis=0)
-gp_td_mpc_dkl_RBF_mean = np.mean([df["episode_reward"] for df in gp_td_mpc_dkl_RBF], axis=0)
-gp_td_mpc_dkl_matern_mean = np.mean([df["episode_reward"] for df in gp_td_mpc_dkl_matern], axis=0)
-gp_td_mpc_dkl_SM_mean = np.mean([df["episode_reward"] for df in gp_td_mpc_dkl_SM], axis=0)
+td_mpc_mean = np.mean([df["episode_reward"].cummax() for df in td_mpc], axis=0)
+gp_td_mpc_RBF_mean = np.mean([df["episode_reward"].cummax() for df in gp_td_mpc_RBF], axis=0)
+# gp_td_mpc_dsp_RBF_mean = np.mean([df["episode_reward"].cummax() for df in gp_td_mpc_dsp_RBF], axis=0)
+gp_td_mpc_matern_mean = np.mean([df["episode_reward"].cummax() for df in gp_td_mpc_matern], axis=0)
+gp_td_mpc_dkl_RBF_mean = np.mean([df["episode_reward"].cummax() for df in gp_td_mpc_dkl_RBF], axis=0)
+gp_td_mpc_dkl_matern_mean = np.mean([df["episode_reward"].cummax() for df in gp_td_mpc_dkl_matern], axis=0)
+gp_td_mpc_dkl_SM_mean = np.mean([df["episode_reward"].cummax() for df in gp_td_mpc_dkl_SM], axis=0)
 
 timesteps = td_mpc[0]["env_step"]
+
+
+# Set larger fonts
+plt.rcParams.update({'font.size': 12})
 
 # Plot performance and number of inducing points in subplots
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
@@ -97,7 +101,7 @@ ax2.set_title("Inducing Points Comparison (Reacher-v5)")
 
 # Adjust legend and show plot
 handles, labels = ax1.get_legend_handles_labels()
-fig.legend(handles, labels, loc='lower center', ncol=6)
+fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(0.5, -0.01), ncol=3)
 plt.show()
 
 # Compute total runtime and std
