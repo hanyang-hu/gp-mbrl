@@ -317,7 +317,8 @@ class DKLOVC(gpytorch.models.ExactGP):
     
 
 class KISSGP(gpytorch.models.ExactGP):
-    def __init__(self, output_dim, grid_bounds=[(-1., 1.), (-1., 1.)], grid_size=16, likelihood=None):
+    def __init__(self, output_dim, grid_bounds=[(-1., 1.), (-1., 1.)], 
+                 grid_size=16, ski_dim=2, likelihood=None, kernel="Matern"):
         super(KISSGP, self).__init__(
             train_inputs=torch.zeros(output_dim, 10, 2),
             train_targets=torch.zeros(output_dim, 10),
@@ -325,19 +326,50 @@ class KISSGP(gpytorch.models.ExactGP):
         )
 
         self.mean_module = gpytorch.means.ConstantMean(batch_shape=torch.Size([output_dim]))
-        self.covar_module = gpytorch.kernels.GridInterpolationKernel(
-            gpytorch.kernels.ScaleKernel(
-                gpytorch.kernels.RBFKernel(
-                    ard_num_dims=2,
+        if kernel == "RBF":
+            self.covar_module = gpytorch.kernels.GridInterpolationKernel(
+                gpytorch.kernels.ScaleKernel(
+                    gpytorch.kernels.RBFKernel(
+                        ard_num_dims=ski_dim,
+                        batch_shape=torch.Size([output_dim]),
+                    ),
                     batch_shape=torch.Size([output_dim]),
-                    # num_mixtures=4,
                 ),
-                batch_shape=torch.Size([output_dim]),
-            ),
-            num_dims=2,
-            grid_bounds=grid_bounds,
-            grid_size=grid_size,
-        )
+                num_dims=ski_dim,
+                grid_bounds=grid_bounds,
+                grid_size=grid_size,
+            )
+            print("Using SKI+RBF Kernel.")
+        elif kernel == "Matern":
+            self.covar_module = gpytorch.kernels.GridInterpolationKernel(
+                gpytorch.kernels.ScaleKernel(
+                    gpytorch.kernels.MaternKernel(
+                        ard_num_dims=ski_dim,
+                        batch_shape=torch.Size([output_dim]),
+                        nu=1.5,
+                    ),
+                    batch_shape=torch.Size([output_dim]),
+                ),
+                num_dims=ski_dim,
+                grid_bounds=grid_bounds,
+                grid_size=grid_size,
+            )
+            print("Using SKI+Matern Kernel.")
+        elif kernel == "SM":
+            self.covar_module = gpytorch.kernels.GridInterpolationKernel(
+                gpytorch.kernels.ScaleKernel(
+                    gpytorch.kernels.SpectralMixtureKernel(
+                        num_mixtures=4,
+                        ard_num_dims=ski_dim,
+                        batch_shape=torch.Size([output_dim]),
+                    ),
+                    batch_shape=torch.Size([output_dim]),
+                ),
+                num_dims=ski_dim,
+                grid_bounds=grid_bounds,
+                grid_size=grid_size,
+            )
+            print("Using SKI+SM Kernel.")
 
     def forward(self, x):
         mean = self.mean_module(x)
@@ -351,15 +383,12 @@ class DKLSKI(torch.nn.Module):
     """
     def __init__(
             self, input_dim, hidden_dim, output_dim, likelihood=None, 
-            num_inducing_points=256, latent_gp_dim=2, grid_bound=(-1., 1.)
+            grid_size=32, ski_dim=2, kernel="Matern", grid_bound=(-1., 1.)
         ):
         super(DKLSKI, self).__init__()
 
-        assert num_inducing_points == 256, "Currently, SKI only supports 256 inducing points."
-        assert latent_gp_dim == 2, "Currently, SKI only supports 2 latent GP dimensions."
-
         self.input_dim = input_dim
-        self.ski_dim = latent_gp_dim
+        self.ski_dim = ski_dim
         self.output_dim = output_dim
 
         self.feature_extractor = FeatureExtractor(input_dim, hidden_dim, output_dim * self.ski_dim)
@@ -373,22 +402,13 @@ class DKLSKI(torch.nn.Module):
         self.gp_layer = KISSGP(
             output_dim=output_dim, 
             grid_bounds=grid_bounds, 
-            likelihood=likelihood
+            grid_size=grid_size,
+            ski_dim=ski_dim,
+            likelihood=likelihood,
+            kernel=kernel
         )
 
         self.apply(orthogonal_init)
-
-    # @torch.no_grad()
-    # def clear_cache(self, train_inputs, train_targets):
-    #     if not self.eval():
-    #         raise RuntimeError("Model must be in eval mode to update cache.")
-
-    #     x = self.feature_extractor(train_inputs).t()
-    #     x = x.reshape(self.output_dim, self.ski_dim, -1).permute(0, 2, 1)
-    #     x = self.scale_to_bounds(x)
-        
-    #     self.set_train_data(x, train_targets, strict=False)
-    #     output = self.forward(train_inputs) # warm-up
 
     def forward(self, x):
         """

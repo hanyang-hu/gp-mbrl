@@ -160,13 +160,19 @@ plt.show()
 
 
 """
-set CUBLAS_WORKSPACE_CONFIG=:16:8
+set CUBLAS_WORKSPACE_CONFIG=:16:8]
 
 python train.py --seed 1 --kernel "RBF"
 python train.py --seed 2 --kernel "RBF"
 python train.py --seed 3 --kernel "RBF"
 python train.py --seed 4 --kernel "RBF"
 python train.py --seed 5 --kernel "RBF"
+
+python train.py --seed 1 --kernel "NA"
+python train.py --seed 2 --kernel "NA"
+python train.py --seed 3 --kernel "NA"
+python train.py --seed 4 --kernel "NA"
+python train.py --seed 5 --kernel "NA"
 
 python train.py --seed 1 --kernel "RBF" --cfg_path "./configs/pendulum_dkl.yaml"
 python train.py --seed 2 --kernel "RBF" --cfg_path "./configs/pendulum_dkl.yaml"
@@ -227,13 +233,6 @@ python train.py --seed 2 --kernel "RBF" --cfg_path "./configs/pendulum_dkl_fps.y
 python train.py --seed 3 --kernel "RBF" --cfg_path "./configs/pendulum_dkl_fps.yaml"
 python train.py --seed 4 --kernel "RBF" --cfg_path "./configs/pendulum_dkl_fps.yaml"
 python train.py --seed 5 --kernel "RBF" --cfg_path "./configs/pendulum_dkl_fps.yaml"
-
-python train.py --seed 1 --kernel "NA"
-python train.py --seed 2 --kernel "NA"
-python train.py --seed 3 --kernel "NA"
-python train.py --seed 4 --kernel "NA"
-python train.py --seed 5 --kernel "NA"
-
 
 
 """

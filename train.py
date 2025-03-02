@@ -76,7 +76,7 @@ def train(cfg_path = "./configs/default.yaml", seed=None, kernel=None):
     # agent = TDMPC(cfg) if (cfg.kernel == "NA") else GPTDMPC(cfg)
     if cfg.kernel == "NA":
         agent = TDMPC(cfg)
-    elif cfg.kernel == "SKI":
+    elif hasattr(cfg, 'use_SKI') and cfg.use_SKI:
         agent = GPTDMPC_SKI(cfg)
     else:
         agent = GPTDMPC(cfg)
@@ -149,7 +149,7 @@ def train(cfg_path = "./configs/default.yaml", seed=None, kernel=None):
             'env_step': env_step,
             'total_time': time.time() - start_time,
             'episode_reward': episode.cumulative_reward,
-            'num_inducing_points': agent.dynamics_gp.m_u.shape[-1] if ((cfg.kernel not in {"NA", "SKI"}) and agent.cache) else 0,
+            'num_inducing_points': agent.dynamics_gp.m_u.shape[-1] if (cfg.kernel != "NA" and (not cfg.use_SKI) and agent.cache) else 0,
         }
         update_metric(train_metrics, common_metrics)
         try:

@@ -1,7 +1,8 @@
 # environment
 task: "Pendulum-v1"
 exp_name: gp_td_mpc_dkl_ski
-kernel: "SKI" # use DKL + RBF + SKI
+kernel: "RBF" # use DKL + RBF + SKI
+use_SKI: True
 res_dyna: False # Residual connection in the dynamics model
 save_path: "models/${task}/${exp_name}_${kernel}_${seed}.pt"
 modality: 'state'
@@ -72,7 +73,11 @@ pivoted_cholesky: True
 fps: False # do not use FPS when the total amount of data is small
 use_DKL: True
 DKL_weiht_decay: False
-use_DSP: False
+use_DSP: False # dimensionality-scaled lengthscale prior
+
+# SKI specific
+grid_size: 16 # num of inducing point is grid_size ** ski_dim
+ski_dim: 2
 
 # architecture
 enc_dim: 256

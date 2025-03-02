@@ -9,6 +9,7 @@ task_list = {
     "Pusher-v5",
     "important-data-Swimmer-v5-256from4096",
     "Swimmer-v5",
+    "HalfCheetah-v5",
 }
 
 exp_name_list = {

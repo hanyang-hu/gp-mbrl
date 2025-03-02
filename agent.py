@@ -684,8 +684,9 @@ class GPTDMPC_SKI(GPTDMPC):
         self.dynamics_gp = utils.DKLSKI(
             cfg.obs_dim + cfg.action_dim, cfg.mlp_dim, cfg.obs_dim+1,
             likelihood=self.dynamics_likelihood, 
-            num_inducing_points=cfg.num_inducing_points,
-            latent_gp_dim=cfg.latent_gp_dim, 
+            grid_size=cfg.grid_size,
+            ski_dim=cfg.ski_dim,
+            kernel=cfg.kernel
         ).to(self.device)
         self.dynamics_gp_mll = gpytorch.mlls.ExactMarginalLogLikelihood(
             self.dynamics_gp.gp_layer.likelihood, 
