@@ -754,7 +754,8 @@ class GPTDMPC_SKI(GPTDMPC):
         dm_gp_inputs = self.dynamics_gp.scale_to_bounds(dm_gp_inputs)
 
         self.dynamics_gp.gp_layer.set_train_data(dm_gp_inputs, dm_targets, strict=False)
-        self.dynamics_gp.gp_layer(dm_gp_inputs).mean # warm up the model
+        with gpytorch.settings.fast_pred_var():
+            self.dynamics_gp.gp_layer(dm_gp_inputs).mean # warm up the model
 
     @torch.no_grad()
     def corrected_next(self, z, a):
