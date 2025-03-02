@@ -167,11 +167,22 @@ python train.py --seed 4 --kernel "RBF" --cfg_path "./configs/swimmer_dkl_2d.yam
 python train.py --seed 5 --kernel "RBF" --cfg_path "./configs/swimmer_dkl_2d.yaml" 
 
 python train.py --seed 1 --kernel "Matern" --cfg_path "./configs/swimmer_dkl_ski.yaml" 
+python train.py --seed 2 --kernel "Matern" --cfg_path "./configs/swimmer_dkl_ski.yaml" 
+python train.py --seed 3 --kernel "Matern" --cfg_path "./configs/swimmer_dkl_ski.yaml" 
+python train.py --seed 4 --kernel "Matern" --cfg_path "./configs/swimmer_dkl_ski.yaml" 
+python train.py --seed 5 --kernel "Matern" --cfg_path "./configs/swimmer_dkl_ski.yaml" 
+
+python train.py --seed 1 --kernel "RBF" --cfg_path "./configs/swimmer_dkl_ski.yaml" 
+python train.py --seed 2 --kernel "RBF" --cfg_path "./configs/swimmer_dkl_ski.yaml" 
+python train.py --seed 3 --kernel "RBF" --cfg_path "./configs/swimmer_dkl_ski.yaml" 
+python train.py --seed 4 --kernel "RBF" --cfg_path "./configs/swimmer_dkl_ski.yaml" 
+python train.py --seed 5 --kernel "RBF" --cfg_path "./configs/swimmer_dkl_ski.yaml" 
+
+python train.py --seed 1 --kernel "SM" --cfg_path "./configs/swimmer_dkl_ski.yaml" 
 python train.py --seed 2 --kernel "SM" --cfg_path "./configs/swimmer_dkl_ski.yaml" 
 python train.py --seed 3 --kernel "SM" --cfg_path "./configs/swimmer_dkl_ski.yaml" 
 python train.py --seed 4 --kernel "SM" --cfg_path "./configs/swimmer_dkl_ski.yaml" 
 python train.py --seed 5 --kernel "SM" --cfg_path "./configs/swimmer_dkl_ski.yaml" 
-
 
 """
 

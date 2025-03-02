@@ -378,7 +378,8 @@ class DKLSKI(torch.nn.Module):
     """
     def __init__(
             self, input_dim, hidden_dim, output_dim, likelihood=None, 
-            grid_size=32, ski_dim=2, kernel="Matern", grid_bound=(-1., 1.)
+            grid_size=32, ski_dim=2, kernel="Matern", grid_bound=(-1., 1.),
+            tanh_coef=0.96
         ):
         super(DKLSKI, self).__init__()
 
@@ -390,7 +391,9 @@ class DKLSKI(torch.nn.Module):
 
         grid_bounds = [grid_bound,] * self.ski_dim
         self.grid_bounds = grid_bounds
-        self.scale_to_bounds = gpytorch.utils.grid.ScaleToBounds(grid_bound[0], grid_bound[1])
+        # self.scale_to_bounds = gpytorch.utils.grid.ScaleToBounds(grid_bound[0], grid_bound[1])
+        tanh_fn = torch.nn.Tanh()
+        self.scale_to_bounds = lambda x: tanh_fn(x) * tanh_coef * (grid_bound[1] - grid_bound[0]) / 2 + (grid_bound[1] + grid_bound[0]) / 2
 
         self.mean_module = gpytorch.means.ConstantMean(batch_shape=torch.Size([output_dim]))
 
