@@ -750,12 +750,19 @@ class GPTDMPC_SKI(GPTDMPC):
 
         # Set train data and compute cache
         dm_gp_inputs = self.dynamics_gp.feature_extractor(inputs).t()
-        dm_gp_inputs = dm_gp_inputs.reshape(self.cfg.obs_dim+1, 2, -1).permute(0, 2, 1)
+        dm_gp_inputs = dm_gp_inputs.reshape(self.cfg.obs_dim+1, self.cfg.ski_dim, -1).permute(0, 2, 1)
         dm_gp_inputs = self.dynamics_gp.scale_to_bounds(dm_gp_inputs)
 
         self.dynamics_gp.gp_layer.set_train_data(dm_gp_inputs, dm_targets, strict=False)
         with gpytorch.settings.fast_pred_var():
-            self.dynamics_gp.gp_layer(dm_gp_inputs).mean # warm up the model
+            self.dynamics_likelihood(self.dynamics_gp.gp_layer(dm_gp_inputs)).mean # warm up the model
+
+        # self.dynamics_gp.gp_layer.prediction_strategy.uses_wiski = True
+
+        # with gpytorch.settings.fast_pred_var():
+        #     self.dynamics_likelihood(self.dynamics_gp.gp_layer(dm_gp_inputs)).mean # warm up the model again
+
+        print("GP layer cache computed.")
 
     @torch.no_grad()
     def corrected_next(self, z, a):
@@ -767,6 +774,8 @@ class GPTDMPC_SKI(GPTDMPC):
 
         # gp orrections
         dm_corr = self.dynamics_gp.mean_inference(torch.cat([z, a], dim=-1))
+        # with gpytorch.settings.fast_pred_var(), gpytorch.settings.max_root_decomposition_size(128):
+        #     dm_corr = self.dynamics_likelihood(self.dynamics_gp(torch.cat([z, a], dim=-1).t())).mean
         if dm_corr is not None:
             dm_corr = dm_corr.t()
         else:
@@ -887,7 +896,7 @@ class GPTDMPC_SKI(GPTDMPC):
                 # Set train data
                 # self.dynamics_gp.set_train_data(gp_inputs, dm_targets, strict=False)
                 dm_gp_inputs = self.dynamics_gp.feature_extractor(gp_inputs).t()
-                dm_gp_inputs = dm_gp_inputs.reshape(self.cfg.obs_dim+1, 2, -1).permute(0, 2, 1)
+                dm_gp_inputs = dm_gp_inputs.reshape(self.cfg.obs_dim+1, self.cfg.ski_dim, -1).permute(0, 2, 1)
                 dm_gp_inputs = self.dynamics_gp.scale_to_bounds(dm_gp_inputs)
 
                 self.dynamics_gp.gp_layer_train.set_train_data(dm_gp_inputs, dm_targets, strict=False)

@@ -76,8 +76,8 @@ DKL_weiht_decay: False
 use_DSP: False
 
 # SKI specific
-grid_size: 32 # num of inducing point is grid_size ** ski_dim
-ski_dim: 2
+grid_size: 16 # num of inducing point is grid_size ** ski_dim
+ski_dim: 3
 
 # architecture
 enc_dim: 256

@@ -321,8 +321,8 @@ class KISSGP(gpytorch.models.ExactGP):
                  grid_size=16, ski_dim=2, likelihood=None, kernel="Matern",
                  KISS=True):
         super(KISSGP, self).__init__(
-            train_inputs=torch.zeros(output_dim, 10, 2),
-            train_targets=torch.zeros(output_dim, 10),
+            train_inputs=None, 
+            train_targets=None, 
             likelihood=likelihood
         )
 
@@ -438,7 +438,7 @@ class DKLSKI(torch.nn.Module):
 
         # Fetch WISKI mean cache, do inference
         if self.gp_layer.prediction_strategy:
-            mean_cache = self.gp_layer.prediction_strategy.fantasy_mean_cache
+            mean_cache = self.gp_layer.prediction_strategy.fantasy_mean_cache if self.gp_layer.prediction_strategy.uses_wiski else self.gp_layer.prediction_strategy.mean_cache
             test_interp_indices, test_interp_values = self.gp_layer.covar_module._compute_grid(x)
 
             return test_mean + left_interp(test_interp_indices, test_interp_values, mean_cache).squeeze(-1)
