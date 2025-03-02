@@ -15,7 +15,7 @@ gp_td_mpc_dkl_RBF_filenames = [f"{task}/metrics_{exp_name}_{kernel}_{seed}.csv" 
 exp_name, kernel = "gp_td_mpc_dkl_fps", "RBF"
 gp_td_mpc_dkl_fps_RBF_filenames = [f"{task}/metrics_{exp_name}_{kernel}_{seed}.csv" for seed in range(1, 6)]
 
-exp_name, kernel = "gp_td_mpc_dkl_ski", "SKI"
+exp_name, kernel = "gp_td_mpc_dkl_ski", "RBF"
 gp_td_mpc_dkl_ski_filenames = [f"{task}/metrics_{exp_name}_{kernel}_{seed}.csv" for seed in range(1, 6)]
 
 # read files

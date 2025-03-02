@@ -558,6 +558,9 @@ class GPTDMPC(TDMPC):
             }
 
     def update_gp_prior(self):
+        raise NotImplementedError
+        """
+        # Not needed
         self.gp_optim.zero_grad(set_to_none=True)
 
         # Compute GP loss
@@ -604,6 +607,7 @@ class GPTDMPC(TDMPC):
         self.gp_optim.step()
 
         return gp_loss.item()
+        """
 
     @torch.no_grad()
     def compute_cache(self):
@@ -689,8 +693,8 @@ class GPTDMPC_SKI(GPTDMPC):
             kernel=cfg.kernel
         ).to(self.device)
         self.dynamics_gp_mll = gpytorch.mlls.ExactMarginalLogLikelihood(
-            self.dynamics_gp.gp_layer.likelihood, 
-            self.dynamics_gp.gp_layer
+            self.dynamics_gp.gp_layer_train.likelihood, 
+            self.dynamics_gp.gp_layer_train
         )
 
         assert cfg.use_DKL, "SKI only supports DKL for now."
@@ -698,8 +702,8 @@ class GPTDMPC_SKI(GPTDMPC):
         self.gp_optim = torch.optim.Adam(
             [
                 {'params': self.dynamics_gp.feature_extractor.parameters(), 'weight_decay': 1e-4 if cfg.DKL_weiht_decay else 0},
-                {'params': self.dynamics_gp.gp_layer.mean_module.parameters()},
-                {'params': self.dynamics_gp.gp_layer.covar_module.parameters(), 'lr': cfg.lr},
+                {'params': self.dynamics_gp.gp_layer_train.mean_module.parameters()},
+                {'params': self.dynamics_gp.gp_layer_train.covar_module.parameters(), 'lr': cfg.lr},
                 {'params': self.dynamics_likelihood.parameters(), 'lr': cfg.lr},
             ],
             lr=self.cfg.lr
@@ -715,6 +719,13 @@ class GPTDMPC_SKI(GPTDMPC):
     def compute_cache(self):
         print("Computing cache...")
         self.cache = True 
+
+        # Copy mean_module and covar_module parameters from gp_layer_tran to gp_layer
+        self.dynamics_gp.gp_layer.mean_module.load_state_dict(self.dynamics_gp.gp_layer_train.mean_module.state_dict())
+        self.dynamics_gp.gp_layer.covar_module.base_kernel.load_state_dict(self.dynamics_gp.gp_layer_train.covar_module.state_dict())
+        print("GP layer parameters copied.")
+        # print(self.dynamics_gp.gp_layer.likelihood.noise_covar.noise)
+        # print(self.dynamics_gp.gp_layer_train.likelihood.noise_covar.noise)
 
         # Fetch data from memory
         window_size = self.current_step+1 # all data in the memory
@@ -743,16 +754,7 @@ class GPTDMPC_SKI(GPTDMPC):
         dm_gp_inputs = self.dynamics_gp.scale_to_bounds(dm_gp_inputs)
 
         self.dynamics_gp.gp_layer.set_train_data(dm_gp_inputs, dm_targets, strict=False)
-        output = self.dynamics_gp.gp_layer(dm_gp_inputs).mean # warm up the model
-
-        # # Set train data and compute cache
-        # try:
-        #     with linear_operator.settings.cholesky_jitter(1e-2):
-        #         self.dynamics_gp.clear_cache(inputs, dm_targets)  
-        #         # print("Dynamics GP Rank: ", self.dynamics_gp.m_u.shape)
-        # except:
-        #     print("Numerical issue raised during cache update. Not using cache in this episode.")
-        #     self.cache = False
+        self.dynamics_gp.gp_layer(dm_gp_inputs).mean # warm up the model
 
     @torch.no_grad()
     def corrected_next(self, z, a):
@@ -887,10 +889,10 @@ class GPTDMPC_SKI(GPTDMPC):
                 dm_gp_inputs = dm_gp_inputs.reshape(self.cfg.obs_dim+1, 2, -1).permute(0, 2, 1)
                 dm_gp_inputs = self.dynamics_gp.scale_to_bounds(dm_gp_inputs)
 
-                self.dynamics_gp.gp_layer.set_train_data(dm_gp_inputs, dm_targets, strict=False)
+                self.dynamics_gp.gp_layer_train.set_train_data(dm_gp_inputs, dm_targets, strict=False)
 
                 # Compute GP loss
-                gp_output = self.dynamics_gp.gp_layer(dm_gp_inputs)
+                gp_output = self.dynamics_gp.gp_layer_train(dm_gp_inputs)
                 gp_loss = -self.dynamics_gp_mll(gp_output, dm_targets).mean()
 
                 gp_loss.backward()

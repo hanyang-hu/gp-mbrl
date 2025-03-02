@@ -318,7 +318,8 @@ class DKLOVC(gpytorch.models.ExactGP):
 
 class KISSGP(gpytorch.models.ExactGP):
     def __init__(self, output_dim, grid_bounds=[(-1., 1.), (-1., 1.)], 
-                 grid_size=16, ski_dim=2, likelihood=None, kernel="Matern"):
+                 grid_size=16, ski_dim=2, likelihood=None, kernel="Matern",
+                 KISS=True):
         super(KISSGP, self).__init__(
             train_inputs=torch.zeros(output_dim, 10, 2),
             train_targets=torch.zeros(output_dim, 10),
@@ -327,49 +328,43 @@ class KISSGP(gpytorch.models.ExactGP):
 
         self.mean_module = gpytorch.means.ConstantMean(batch_shape=torch.Size([output_dim]))
         if kernel == "RBF":
-            self.covar_module = gpytorch.kernels.GridInterpolationKernel(
-                gpytorch.kernels.ScaleKernel(
-                    gpytorch.kernels.RBFKernel(
-                        ard_num_dims=ski_dim,
-                        batch_shape=torch.Size([output_dim]),
-                    ),
+            base_kernel = gpytorch.kernels.ScaleKernel(
+                gpytorch.kernels.RBFKernel(
+                    ard_num_dims=ski_dim,
                     batch_shape=torch.Size([output_dim]),
                 ),
-                num_dims=ski_dim,
-                grid_bounds=grid_bounds,
-                grid_size=grid_size,
+                batch_shape=torch.Size([output_dim]),
             )
             print("Using SKI+RBF Kernel.")
         elif kernel == "Matern":
-            self.covar_module = gpytorch.kernels.GridInterpolationKernel(
-                gpytorch.kernels.ScaleKernel(
-                    gpytorch.kernels.MaternKernel(
-                        ard_num_dims=ski_dim,
-                        batch_shape=torch.Size([output_dim]),
-                        nu=1.5,
-                    ),
+            base_kernel = gpytorch.kernels.ScaleKernel(
+                gpytorch.kernels.MaternKernel(
+                    ard_num_dims=ski_dim,
                     batch_shape=torch.Size([output_dim]),
+                    nu=1.5,
                 ),
-                num_dims=ski_dim,
-                grid_bounds=grid_bounds,
-                grid_size=grid_size,
+                batch_shape=torch.Size([output_dim]),
             )
             print("Using SKI+Matern Kernel.")
         elif kernel == "SM":
-            self.covar_module = gpytorch.kernels.GridInterpolationKernel(
-                gpytorch.kernels.ScaleKernel(
-                    gpytorch.kernels.SpectralMixtureKernel(
-                        num_mixtures=4,
-                        ard_num_dims=ski_dim,
-                        batch_shape=torch.Size([output_dim]),
-                    ),
+            base_kernel = gpytorch.kernels.ScaleKernel(
+                gpytorch.kernels.SpectralMixtureKernel(
+                    num_mixtures=4,
+                    ard_num_dims=ski_dim,
                     batch_shape=torch.Size([output_dim]),
                 ),
+                batch_shape=torch.Size([output_dim]),
+            )
+            print("Using SKI+SM Kernel.")
+        if KISS:
+            self.covar_module = gpytorch.kernels.GridInterpolationKernel(
+                base_kernel,
                 num_dims=ski_dim,
                 grid_bounds=grid_bounds,
                 grid_size=grid_size,
             )
-            print("Using SKI+SM Kernel.")
+        else:
+            self.covar_module = base_kernel
 
     def forward(self, x):
         mean = self.mean_module(x)
@@ -406,6 +401,16 @@ class DKLSKI(torch.nn.Module):
             ski_dim=ski_dim,
             likelihood=likelihood,
             kernel=kernel
+        )
+
+        self.gp_layer_train = KISSGP(
+            output_dim=output_dim, 
+            grid_bounds=grid_bounds, 
+            grid_size=grid_size,
+            ski_dim=ski_dim,
+            likelihood=likelihood,
+            kernel=kernel,
+            KISS=False # do not use structured kernel interpolation during training
         )
 
         self.apply(orthogonal_init)
